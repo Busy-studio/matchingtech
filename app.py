@@ -761,7 +761,6 @@ with st.sidebar:
     st.markdown(
         """
 - PDF, DOCX, TXT, MD 업로드 가능
-- 수요기술 키워드 구조화 → 논문 검색 → 논문 적합성 검증 → 교수 매칭 순서로 수행
         """
     )
 
