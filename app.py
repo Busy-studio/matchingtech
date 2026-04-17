@@ -657,17 +657,13 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 
     if not pnu_papers:
         report(total_steps, total_steps, "분석 완료", "부산대 소속 논문을 찾지 못했습니다.")
+        company_name = request_meta.get("company_name", "미확인")
+        tech_summary = request_meta.get("tech_summary", "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.")
         return (
-            f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**"
-            f"### 📝 수요기술 요약
-{request_meta.get('tech_summary', '입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.')}
-
-"
-            f"### 🔍 분석 키워드: **{keywords_text}**
-
-"
-            "- OpenAlex에서 부산대 소속 논문을 찾지 못했습니다.
-"
+            f"### 🏢 기업명: **{company_name}**\n\n"
+            f"### 📝 수요기술 요약\n{tech_summary}\n\n"
+            f"### 🔍 분석 키워드: **{keywords_text}**\n\n"
+            "- OpenAlex에서 부산대 소속 논문을 찾지 못했습니다.\n"
             "- 기술 설명을 더 구체적으로 입력하거나, 영문 기술명/응용 분야를 함께 넣어보세요."
         )
 
@@ -721,8 +717,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         final_output.append("- OpenAlex에 교수명이 아니라 학생/연구원 이름 위주로 잡힌 경우")
         final_output.append("- Gemini 검색에서 교수 정보 확인이 충분히 되지 않은 경우")
         final_output.append("- 입력 기술 설명이 너무 짧거나 일반적이라 연관 논문이 넓게 잡힌 경우")
-        return "
-".join(final_output)
+        return "\n".join(final_output)
 
     sorted_professors = sorted(
         professor_map.items(),
@@ -752,8 +747,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         final_output.append("---")
 
     report(total_steps, total_steps, "분석 완료", f"최종 매칭 교수 {len(professor_map)}명을 정리했습니다.")
-    return "
-".join(final_output)
+    return "\n".join(final_output)
 
 
 # -----------------------------
@@ -791,8 +785,7 @@ if st.button("연구자 매칭 리스트 생성", type="primary"):
         status_box.update(label=label, state="running", expanded=True)
         message = f"**진행 단계:** {label}"
         if detail:
-            message += f"  
-- {detail}"
+            message += f"  \n- {detail}"
         step_placeholder.markdown(message)
 
     try:
