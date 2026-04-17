@@ -943,8 +943,8 @@ with st.sidebar:
     st.markdown(
         """
 - PDF, DOCX, TXT, MD 업로드 가능
-- GEMINI_API_KEY 환경변수 필요
-- OPENALEX_API_KEY는 선택사항
+- 논문 기반으로 수요기술-연구자 매칭
+- 적합한 논문이 없는 경우 공개된 연구 분야 기반으로 매칭
         """
     )
 
