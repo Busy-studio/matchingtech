@@ -539,9 +539,6 @@ with st.sidebar:
     st.header("설정 안내")
     st.markdown(
         """
-- `GEMINI_API_KEY` 환경변수 필수
-- `OPENALEX_API_KEY`는 선택
-- Streamlit Cloud에서는 **Secrets**에 등록
 - PDF, DOCX, TXT, MD 업로드 가능
         """
     )
