@@ -730,7 +730,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     for eng_name, data in sorted_professors:
         final_output.append(f"## 🏫 {data['dept']} | {data['k_name']} 교수 ({eng_name})")
         final_output.append(f"- **주요 연구분야:** {data['field']}")
-        final_output.append(f"- **교수 적합도:** {data.get('relevance', 'Unknown')}")
+        final_output.append(f"- **기술 연관성:** {data.get('relevance', 'Unknown')}")
         if data.get("note"):
             final_output.append(f"- **판단 메모:** {data['note']}")
         final_output.append(f"- **학과/연구실 홈페이지:** [링크 바로가기]({data['link']})")
