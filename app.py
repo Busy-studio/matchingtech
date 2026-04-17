@@ -532,8 +532,8 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
 # -----------------------------
 # UI
 # -----------------------------
-st.title("🎓 부산대 수요기술-연구자 매칭 시스템")
-st.caption("현직 전임교원 중심 · Streamlit 배포용 개편 버전")
+st.title("🎓 PNU 수요기술-연구자 매칭 시스템")
+st.caption("수요기술을 기반으로 부산대학교 연구자를 매칭합니다")
 
 with st.sidebar:
     st.header("설정 안내")
@@ -547,10 +547,10 @@ with st.sidebar:
     )
 
 uploaded_file = st.file_uploader(
-    "1. 수요기술조사서 업로드 (선택)", type=["pdf", "docx", "txt", "md"]
+    "1. 수요기술조사서 업로드", type=["pdf", "docx", "txt", "md"]
 )
 manual_text = st.text_area(
-    "2. 또는 기술 내용 직접 입력",
+    "2. 또는 기술 내용 직접 입력 (선택)",
     placeholder="기술 설명, 적용 분야, 핵심 성능, 장치/공정/소재 정보를 넣으면 연구자 매칭 정확도가 올라갑니다.",
     height=240,
 )
