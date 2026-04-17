@@ -658,9 +658,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     if not pnu_papers:
         report(total_steps, total_steps, "분석 완료", "부산대 소속 논문을 찾지 못했습니다.")
         return (
-            f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**
-
-"
+            f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**"
             f"### 📝 수요기술 요약
 {request_meta.get('tech_summary', '입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.')}
 
