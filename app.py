@@ -345,14 +345,26 @@ def filter_pnu_papers(raw_papers: List[Dict]) -> Tuple[List[Dict], List[str]]:
         p_authors_info = []
         is_pnu_paper = False
 
-        for authorship in p.get("authorships", []):
-            name = authorship.get("author", {}).get("display_name", "Unknown")
-            insts = [inst.get("display_name", "").lower() for inst in authorship.get("institutions", [])]
-            raw_affil = (authorship.get("raw_affiliation_string", "") or "").lower()
+        authorships = p.get("authorships") or []
+        for authorship in authorships:
+            authorship = authorship or {}
+
+            author_obj = authorship.get("author") or {}
+            name = str(author_obj.get("display_name") or "Unknown")
+
+            institutions = authorship.get("institutions") or []
+            insts = []
+            for inst in institutions:
+                inst = inst or {}
+                inst_name = str(inst.get("display_name") or "").lower()
+                insts.append(inst_name)
+
+            raw_affil = str(authorship.get("raw_affiliation_string") or "").lower()
             combined = " ".join(insts) + " " + raw_affil
 
             is_pnu = any(k in combined for k in ["pusan national", "busan national", "부산대"])
             p_authors_info.append((name, is_pnu))
+
             if is_pnu:
                 is_pnu_paper = True
                 if name not in seen_authors:
@@ -362,7 +374,7 @@ def filter_pnu_papers(raw_papers: List[Dict]) -> Tuple[List[Dict], List[str]]:
         if is_pnu_paper:
             loc = p.get("primary_location") or {}
             source = loc.get("source") or {}
-            p["venue"] = source.get("display_name", "게재처 미상")
+            p["venue"] = str(source.get("display_name") or "게재처 미상")
             p["raw_authors_info"] = p_authors_info
             valid_papers.append(p)
 
@@ -685,8 +697,8 @@ def build_professor_map(valid_papers: List[Dict], author_db: Dict, parsed_result
                 continue
 
             db = author_db.get(name, {}) if isinstance(author_db, dict) else {}
-            active = normalize_yes_no(db.get("is_active", "Unknown"))
-            relevance = (db.get("relevance") or "Unknown").strip()
+            active = normalize_yes_no(str(db.get("is_active") or "Unknown"))
+            relevance = str(db.get("relevance") or "Unknown").strip()
 
             if active == "No":
                 continue
