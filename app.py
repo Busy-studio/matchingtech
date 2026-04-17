@@ -621,35 +621,59 @@ def build_professor_map(valid_papers: List[Dict], author_db: Dict, parsed_result
     return professor_map
 
 
-def unified_analyze(uploaded_file, manual_text: str) -> str:
+def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> str:
+    def report(step: int, total: int, label: str, detail: str = ""):
+        if progress_callback:
+            progress_callback(step, total, label, detail)
+
+    total_steps = 8
+    report(0, total_steps, "입력 확인", "파일 또는 직접 입력 내용을 점검하는 중입니다.")
+
     file_text = extract_text_from_uploaded_file(uploaded_file) if uploaded_file else ""
     query_text = file_text.strip() if file_text.strip() else (manual_text or "").strip()
 
     if len(query_text) < 5:
         return "분석할 내용이 없습니다. 파일을 업로드하거나 내용을 입력해주세요."
 
+    report(1, total_steps, "기본 정보 추출", "기업명과 수요기술 요약을 정리하는 중입니다.")
     request_meta = extract_request_metadata(query_text)
+
+    report(2, total_steps, "기술 프로파일 생성", "검색용 키워드와 기술 구조를 도출하는 중입니다.")
     search_profile = extract_search_profile(query_text)
     if not request_meta.get("tech_summary") and search_profile.get("korean_summary"):
         request_meta["tech_summary"] = search_profile.get("korean_summary")
 
     keywords_text = format_keyword_text(search_profile)
+
+    report(3, total_steps, "논문 검색", "OpenAlex에서 부산대 관련 논문을 수집하는 중입니다.")
     raw_papers = search_openalex(
         tuple(search_profile.get("search_keywords", [])),
         tuple(search_profile.get("applications", [])),
         tuple(search_profile.get("core_tech", [])),
     )
+
+    report(4, total_steps, "부산대 논문 필터링", f"수집 논문 {len(raw_papers)}건에서 부산대 소속 저자를 확인하는 중입니다.")
     pnu_papers, unique_pnu_authors = filter_pnu_papers(raw_papers)
 
     if not pnu_papers:
+        report(total_steps, total_steps, "분석 완료", "부산대 소속 논문을 찾지 못했습니다.")
         return (
-            f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**\n\n"
-            f"### 📝 수요기술 요약\n{request_meta.get('tech_summary', '입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.')}\n\n"
-            f"### 🔍 분석 키워드: **{keywords_text}**\n\n"
-            "- OpenAlex에서 부산대 소속 논문을 찾지 못했습니다.\n"
+            f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**
+
+"
+            f"### 📝 수요기술 요약
+{request_meta.get('tech_summary', '입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.')}
+
+"
+            f"### 🔍 분석 키워드: **{keywords_text}**
+
+"
+            "- OpenAlex에서 부산대 소속 논문을 찾지 못했습니다.
+"
             "- 기술 설명을 더 구체적으로 입력하거나, 영문 기술명/응용 분야를 함께 넣어보세요."
         )
 
+    report(5, total_steps, "논문 적합성 검증", f"부산대 논문 {len(pnu_papers)}건이 수요기술과 실제로 맞는지 평가하는 중입니다.")
     relevance_map = score_paper_relevance(pnu_papers, search_profile, request_meta.get("tech_summary", ""))
     valid_papers = select_relevant_papers(pnu_papers, relevance_map)
 
@@ -664,8 +688,11 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
                 seen_filtered_authors.add(name)
                 filtered_authors.append(name)
 
+    report(6, total_steps, "교수 정보 확인", f"교수 후보 {len(filtered_authors[:MAX_AUTHORS_FOR_ENRICH])}명의 현직 여부와 전공 정보를 확인하는 중입니다.")
     paper_titles = [p.get("title", "") for p in valid_papers]
     author_db = enrich_authors_with_gemini(filtered_authors[:MAX_AUTHORS_FOR_ENRICH], search_profile, paper_titles)
+
+    report(7, total_steps, "논문 요약 및 결과 정리", f"적합 논문 {len(valid_papers)}건을 요약하고 최종 결과를 구성하는 중입니다.")
     parsed_results = summarize_papers(valid_papers)
     professor_map = build_professor_map(valid_papers, author_db, parsed_results)
 
@@ -688,6 +715,7 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
     final_output.append("---")
 
     if not professor_map:
+        report(total_steps, total_steps, "분석 완료", "교수 정보 확인까지 마쳤지만 최종 매칭 교수는 없었습니다.")
         final_output.append("현재 부산대학교 재직 전임교원으로 확인된 후보가 없거나, 교수 정보 확인이 충분하지 않았습니다.")
         final_output.append("")
         final_output.append("#### 점검 포인트")
@@ -695,7 +723,8 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
         final_output.append("- OpenAlex에 교수명이 아니라 학생/연구원 이름 위주로 잡힌 경우")
         final_output.append("- Gemini 검색에서 교수 정보 확인이 충분히 되지 않은 경우")
         final_output.append("- 입력 기술 설명이 너무 짧거나 일반적이라 연관 논문이 넓게 잡힌 경우")
-        return "\n".join(final_output)
+        return "
+".join(final_output)
 
     sorted_professors = sorted(
         professor_map.items(),
@@ -724,7 +753,9 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
         final_output.append("")
         final_output.append("---")
 
-    return "\n".join(final_output)
+    report(total_steps, total_steps, "분석 완료", f"최종 매칭 교수 {len(professor_map)}명을 정리했습니다.")
+    return "
+".join(final_output)
 
 
 # -----------------------------
@@ -738,6 +769,7 @@ with st.sidebar:
     st.markdown(
         """
 - PDF, DOCX, TXT, MD 업로드 가능
+- 수요기술 키워드 구조화 → 논문 검색 → 논문 적합성 검증 → 교수 매칭 순서로 수행
         """
     )
 
@@ -751,6 +783,27 @@ manual_text = st.text_area(
 )
 
 if st.button("연구자 매칭 리스트 생성", type="primary"):
-    with st.spinner("분석 중입니다..."):
-        result = unified_analyze(uploaded_file, manual_text)
-    st.markdown(result)
+    status_box = st.status("분석 준비 중입니다...", expanded=True)
+    progress_bar = st.progress(0)
+    step_placeholder = st.empty()
+
+    def update_progress(step, total, label, detail=""):
+        ratio = 0 if total == 0 else min(max(step / total, 0), 1)
+        progress_bar.progress(ratio)
+        status_box.update(label=label, state="running", expanded=True)
+        message = f"**진행 단계:** {label}"
+        if detail:
+            message += f"  
+- {detail}"
+        step_placeholder.markdown(message)
+
+    try:
+        result = unified_analyze(uploaded_file, manual_text, progress_callback=update_progress)
+        progress_bar.progress(1.0)
+        status_box.update(label="분석 완료", state="complete", expanded=False)
+        step_placeholder.success("분석이 완료되었습니다. 아래 결과를 확인하세요.")
+        st.markdown(result)
+    except Exception as e:
+        status_box.update(label="분석 중 오류 발생", state="error", expanded=True)
+        progress_bar.progress(0)
+        step_placeholder.error(f"오류가 발생했습니다: {e}")
