@@ -141,6 +141,45 @@ def extract_text_from_uploaded_file(uploaded_file) -> str:
 # -----------------------------
 # Step 1. Keyword extraction
 # -----------------------------
+def extract_request_metadata(query_text: str) -> Dict[str, str]:
+    company_name = "미확인"
+    tech_summary = "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다."
+
+    prompt = f"""
+당신은 대학 기술이전 실무용 입력정보 정리기입니다.
+아래 텍스트에서 다음 두 항목만 추출하세요.
+
+규칙:
+1. 기업명은 명확히 보일 때만 추출, 없으면 "미확인"
+2. 수요기술 요약은 한국어 1~2문장, 너무 길지 않게
+3. 과장 없이 소재, 공정, 장치, 성능, 적용처 중심으로 요약
+4. 출력은 JSON만 반환
+
+형식:
+{{
+  "company_name": "기업명 또는 미확인",
+  "tech_summary": "수요기술 요약"
+}}
+
+입력 텍스트:
+{query_text[:4000]}
+"""
+
+    try:
+        res = safe_gemini_call(prompt)
+        data = extract_json_object(getattr(res, "text", ""))
+        if isinstance(data, dict):
+            company_name = str(data.get("company_name", company_name)).strip() or company_name
+            tech_summary = str(data.get("tech_summary", tech_summary)).strip() or tech_summary
+    except Exception:
+        pass
+
+    return {
+        "company_name": company_name,
+        "tech_summary": tech_summary,
+    }
+
+
 def extract_keywords(query_text: str) -> Tuple[str, List[str]]:
     fallback_keywords = []
     for token in [x.strip() for x in query_text.replace("\n", " ").split() if x.strip()]:
@@ -426,6 +465,7 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
     if len(query_text) < 5:
         return "분석할 내용이 없습니다. 파일을 업로드하거나 내용을 입력해주세요."
 
+    request_meta = extract_request_metadata(query_text)
     keywords_text, keywords = extract_keywords(query_text)
     raw_papers = search_openalex(keywords)
     valid_papers, unique_pnu_authors = filter_pnu_papers(raw_papers)
@@ -443,6 +483,11 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
     professor_map = build_professor_map(valid_papers, author_db, parsed_results)
 
     final_output = []
+    final_output.append(f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**")
+    final_output.append("")
+    final_output.append(f"### 📝 수요기술 요약")
+    final_output.append(f"{request_meta.get('tech_summary', '입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.')}")
+    final_output.append("")
     final_output.append(f"### 🔍 분석 키워드: **{keywords_text}**")
     final_output.append("")
     final_output.append(f"- 검토 논문 수: **{len(valid_papers)}건**")
