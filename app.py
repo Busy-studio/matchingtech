@@ -117,6 +117,25 @@ def compact_text(text: str, limit: int = 4000) -> str:
     return text[:limit]
 
 
+def clamp_score(value, default=60):
+    try:
+        score = int(value)
+    except Exception:
+        return default
+    return max(0, min(100, score))
+
+
+def label_rank(label: str) -> int:
+    order = {
+        "High": 0,
+        "Medium": 1,
+        "Unknown": 2,
+        "Low": 3,
+        "Exclude": 4,
+    }
+    return order.get(label, 9)
+
+
 # -----------------------------
 # File extraction
 # -----------------------------
@@ -429,11 +448,9 @@ def select_relevant_papers(valid_papers: List[Dict], relevance_map: Dict[str, Di
     for i, p in enumerate(valid_papers, start=1):
         rel = relevance_map.get(str(i), {}) if isinstance(relevance_map, dict) else {}
         label = str(rel.get("relevance", "Medium")).strip()
-        try:
-            score = int(rel.get("score", 60))
-        except Exception:
-            score = 60
+        score = clamp_score(rel.get("score", 60), default=60)
         reason = str(rel.get("reason", "")).strip()
+
         p["paper_relevance"] = label
         p["paper_score"] = score
         p["paper_reason"] = reason
@@ -447,13 +464,17 @@ def select_relevant_papers(valid_papers: List[Dict], relevance_map: Dict[str, Di
 
     if len(selected) < MIN_RELEVANT_PAPERS:
         low_pool = []
-        for i, p in enumerate(valid_papers, start=1):
+        for p in valid_papers:
             if p in selected:
                 continue
-            label = p.get("paper_relevance", "")
-            if label == "Low":
+            if p.get("paper_relevance", "") == "Low":
                 low_pool.append(p)
-        selected.extend(sorted(low_pool, key=lambda x: x.get("paper_score", 0), reverse=True)[: MIN_RELEVANT_PAPERS - len(selected)])
+
+        selected.extend(
+            sorted(low_pool, key=lambda x: x.get("paper_score", 0), reverse=True)[
+                : MIN_RELEVANT_PAPERS - len(selected)
+            ]
+        )
 
     return selected[:MAX_PAPERS]
 
@@ -519,6 +540,82 @@ relevance 기준:
         return extract_json_object(getattr(res, "text", ""))
     except Exception:
         return {}
+
+
+# -----------------------------
+# Step 4-2. Fallback professor search
+# -----------------------------
+def fallback_field_match_professors(search_profile: Dict, tech_summary: str) -> List[Dict]:
+    """
+    논문 기반 매칭 교수가 0명일 경우
+    부산대 교수 공개 연구분야 기준 후보 탐색
+    """
+    prompt = f"""
+당신은 부산대학교 교수 연구분야 매칭 시스템입니다.
+
+논문 기반 직접 매칭 교수 후보가 없을 때,
+부산대학교 현직 전임교원 중 공개된 학과/연구실 정보 기준으로
+수요기술과 연관성 높은 교수 후보 3~5명을 추천하세요.
+
+수요기술 요약:
+{tech_summary}
+
+기술 프로파일:
+- core_tech: {search_profile.get("core_tech", [])}
+- materials_or_methods: {search_profile.get("materials_or_methods", [])}
+- properties: {search_profile.get("properties", [])}
+- applications: {search_profile.get("applications", [])}
+
+출력 규칙:
+1. 반드시 부산대학교 현재 교수만
+2. 실제 있을 가능성이 높은 학과/전공 기준
+3. 논문 근거가 아니라 연구분야 기준 후보
+4. score는 0~100 정수
+5. 출력은 JSON만
+
+형식:
+{{
+  "results": [
+    {{
+      "name": "홍길동",
+      "department": "화학공학과",
+      "field": "고분자 소재, 접착제, 기능성 수지",
+      "score": 92,
+      "reason": "접착소재 및 고분자 수지 연구분야 보유",
+      "link": "https://..."
+    }}
+  ]
+}}
+"""
+
+    try:
+        res = safe_gemini_call(
+            prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.2,
+            ),
+        )
+        data = extract_json_object(getattr(res, "text", ""))
+        results = data.get("results", []) if isinstance(data, dict) else []
+
+        cleaned = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            cleaned.append(
+                {
+                    "name": str(item.get("name", "미확인")).strip() or "미확인",
+                    "department": str(item.get("department", "미확인")).strip() or "미확인",
+                    "field": str(item.get("field", "미확인")).strip() or "미확인",
+                    "score": clamp_score(item.get("score", 70), default=70),
+                    "reason": str(item.get("reason", "")).strip(),
+                    "link": str(item.get("link", "")).strip(),
+                }
+            )
+        return cleaned
+    except Exception:
+        return []
 
 
 # -----------------------------
@@ -615,7 +712,10 @@ def build_professor_map(valid_papers: List[Dict], author_db: Dict, parsed_result
     for _, data in professor_map.items():
         data["papers"] = sorted(
             data["papers"],
-            key=lambda x: (0 if x.get("paper_relevance") == "High" else 1, -int(x.get("paper_score", 0))),
+            key=lambda x: (
+                label_rank(x.get("paper_relevance", "Unknown")),
+                -int(x.get("paper_score", 0)),
+            ),
         )
 
     return professor_map
@@ -640,7 +740,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 
     report(2, total_steps, "기술 프로파일 생성", "검색용 키워드와 기술 구조를 도출하는 중입니다.")
     search_profile = extract_search_profile(query_text)
-    if not request_meta.get("tech_summary") and search_profile.get("korean_summary"):
+    if (not request_meta.get("tech_summary")) and search_profile.get("korean_summary"):
         request_meta["tech_summary"] = search_profile.get("korean_summary")
 
     keywords_text = format_keyword_text(search_profile)
@@ -653,26 +753,57 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     )
 
     report(4, total_steps, "부산대 논문 필터링", f"수집 논문 {len(raw_papers)}건에서 부산대 소속 저자를 확인하는 중입니다.")
-    pnu_papers, unique_pnu_authors = filter_pnu_papers(raw_papers)
+    pnu_papers, _ = filter_pnu_papers(raw_papers)
 
     if not pnu_papers:
         report(total_steps, total_steps, "분석 완료", "부산대 소속 논문을 찾지 못했습니다.")
         company_name = request_meta.get("company_name", "미확인")
         tech_summary = request_meta.get("tech_summary", "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.")
-        return (
-            f"### 🏢 기업명: **{company_name}**\n\n"
-            f"### 📝 수요기술 요약\n{tech_summary}\n\n"
-            f"### 🔍 분석 키워드: **{keywords_text}**\n\n"
-            "- OpenAlex에서 부산대 소속 논문을 찾지 못했습니다.\n"
-            "- 기술 설명을 더 구체적으로 입력하거나, 영문 기술명/응용 분야를 함께 넣어보세요."
-        )
+
+        fallback_candidates = fallback_field_match_professors(search_profile, tech_summary)
+
+        final_output = []
+        final_output.append(f"### 🏢 기업명: **{company_name}**")
+        final_output.append("")
+        final_output.append("### 📝 수요기술 요약")
+        final_output.append(tech_summary)
+        final_output.append("")
+        final_output.append(f"### 🔍 분석 키워드: **{keywords_text}**")
+        final_output.append("")
+        final_output.append("- OpenAlex에서 부산대 소속 논문을 찾지 못했습니다.")
+        final_output.append("- 대신 부산대학교 교수진의 공개 연구분야를 기준으로 후보를 탐색했습니다.")
+        final_output.append("")
+        final_output.append("---")
+
+        if fallback_candidates:
+            final_output.append("## 🔎 연구분야 매칭 후보")
+            final_output.append("")
+            for prof in sorted(fallback_candidates, key=lambda x: x.get("score", 0), reverse=True):
+                final_output.append(f"### 🏫 {prof.get('department', '미확인')} | {prof.get('name', '미확인')} 교수")
+                final_output.append(f"- **연구분야:** {prof.get('field', '미확인')}")
+                final_output.append(f"- **연구분야 연관성:** {prof.get('score', 0)}점")
+                if prof.get("reason"):
+                    final_output.append(f"- **추천 사유:** {prof.get('reason')}")
+                if prof.get("link"):
+                    final_output.append(f"- **홈페이지:** [링크 바로가기]({prof.get('link')})")
+                final_output.append("")
+
+        return "\n".join(final_output)
 
     report(5, total_steps, "논문 적합성 검증", f"부산대 논문 {len(pnu_papers)}건이 수요기술과 실제로 맞는지 평가하는 중입니다.")
-    relevance_map = score_paper_relevance(pnu_papers, search_profile, request_meta.get("tech_summary", ""))
+    relevance_map = score_paper_relevance(
+        pnu_papers,
+        search_profile,
+        request_meta.get("tech_summary", ""),
+    )
     valid_papers = select_relevant_papers(pnu_papers, relevance_map)
 
     if not valid_papers:
         valid_papers = pnu_papers[:MIN_RELEVANT_PAPERS]
+        for p in valid_papers:
+            p["paper_relevance"] = p.get("paper_relevance", "Low")
+            p["paper_score"] = clamp_score(p.get("paper_score", 50), default=50)
+            p["paper_reason"] = p.get("paper_reason", "적합 논문 최소 확보를 위한 보조 포함")
 
     filtered_authors = []
     seen_filtered_authors = set()
@@ -684,11 +815,22 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 
     report(6, total_steps, "교수 정보 확인", f"교수 후보 {len(filtered_authors[:MAX_AUTHORS_FOR_ENRICH])}명의 현직 여부와 전공 정보를 확인하는 중입니다.")
     paper_titles = [p.get("title", "") for p in valid_papers]
-    author_db = enrich_authors_with_gemini(filtered_authors[:MAX_AUTHORS_FOR_ENRICH], search_profile, paper_titles)
+    author_db = enrich_authors_with_gemini(
+        filtered_authors[:MAX_AUTHORS_FOR_ENRICH],
+        search_profile,
+        paper_titles,
+    )
 
     report(7, total_steps, "논문 요약 및 결과 정리", f"적합 논문 {len(valid_papers)}건을 요약하고 최종 결과를 구성하는 중입니다.")
     parsed_results = summarize_papers(valid_papers)
     professor_map = build_professor_map(valid_papers, author_db, parsed_results)
+
+    fallback_candidates = []
+    if not professor_map:
+        fallback_candidates = fallback_field_match_professors(
+            search_profile,
+            request_meta.get("tech_summary", "")
+        )
 
     high_count = sum(1 for p in valid_papers if p.get("paper_relevance") == "High")
     medium_count = sum(1 for p in valid_papers if p.get("paper_relevance") == "Medium")
@@ -697,7 +839,12 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     final_output.append(f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**")
     final_output.append("")
     final_output.append("### 📝 수요기술 요약")
-    final_output.append(request_meta.get("tech_summary", "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다."))
+    final_output.append(
+        request_meta.get(
+            "tech_summary",
+            "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다."
+        )
+    )
     final_output.append("")
     final_output.append(f"### 🔍 분석 키워드: **{keywords_text}**")
     final_output.append("")
@@ -709,21 +856,54 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     final_output.append("---")
 
     if not professor_map:
-        report(total_steps, total_steps, "분석 완료", "교수 정보 확인까지 마쳤지만 최종 매칭 교수는 없었습니다.")
-        final_output.append("현재 부산대학교 재직 전임교원으로 확인된 후보가 없거나, 교수 정보 확인이 충분하지 않았습니다.")
+        final_output.append("논문 기반 직접 매칭 교수는 없었습니다.")
+        final_output.append("대신 부산대학교 교수진의 공개 연구분야를 기준으로 후보를 제안합니다.")
         final_output.append("")
-        final_output.append("#### 점검 포인트")
-        final_output.append("- 논문 적합성 검증 후 교수 후보 풀이 좁아진 경우")
-        final_output.append("- OpenAlex에 교수명이 아니라 학생/연구원 이름 위주로 잡힌 경우")
-        final_output.append("- Gemini 검색에서 교수 정보 확인이 충분히 되지 않은 경우")
-        final_output.append("- 입력 기술 설명이 너무 짧거나 일반적이라 연관 논문이 넓게 잡힌 경우")
+        final_output.append("---")
+
+        if fallback_candidates:
+            final_output.append("## 🔎 연구분야 매칭 후보")
+            final_output.append("")
+
+            fallback_candidates = sorted(
+                fallback_candidates,
+                key=lambda x: x.get("score", 0),
+                reverse=True
+            )
+
+            for prof in fallback_candidates:
+                final_output.append(f"### 🏫 {prof.get('department', '미확인')} | {prof.get('name', '미확인')} 교수")
+                final_output.append(f"- **연구분야:** {prof.get('field', '미확인')}")
+                final_output.append(f"- **연구분야 연관성:** {prof.get('score', 0)}점")
+                if prof.get("reason"):
+                    final_output.append(f"- **추천 사유:** {prof.get('reason', '')}")
+                if prof.get("link"):
+                    final_output.append(f"- **홈페이지:** [링크 바로가기]({prof.get('link')})")
+                final_output.append("")
+
+            report(
+                total_steps,
+                total_steps,
+                "분석 완료",
+                f"연구분야 기반 후보 {len(fallback_candidates)}명을 제안했습니다."
+            )
+            return "\n".join(final_output)
+
+        final_output.append("연구분야 기반 후보도 찾지 못했습니다.")
+        report(
+            total_steps,
+            total_steps,
+            "분석 완료",
+            "최종 후보를 찾지 못했습니다."
+        )
         return "\n".join(final_output)
 
     sorted_professors = sorted(
         professor_map.items(),
         key=lambda x: (
-            0 if x[1].get("relevance") == "High" else 1,
+            label_rank(x[1].get("relevance", "Unknown")),
             -sum(int(p.get("paper_score", 0)) for p in x[1].get("papers", [])),
+            -len(x[1].get("papers", [])),
         ),
     )
 
@@ -736,6 +916,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         final_output.append(f"- **학과/연구실 홈페이지:** [링크 바로가기]({data['link']})")
         final_output.append("")
         final_output.append("#### 📄 관련 연구 논문 내역")
+
         for idx, paper in enumerate(data["papers"], start=1):
             final_output.append(f"{idx}. **{paper['k_title']}**")
             final_output.append(f"   - 원제: {paper['title']}")
@@ -743,6 +924,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
             if paper.get("paper_reason"):
                 final_output.append(f"   - 적합성 근거: {paper['paper_reason']}")
             final_output.append(f"   - 요약: {paper['summary']} ({paper['date']}, {paper['venue']})")
+
         final_output.append("")
         final_output.append("---")
 
@@ -761,12 +943,16 @@ with st.sidebar:
     st.markdown(
         """
 - PDF, DOCX, TXT, MD 업로드 가능
+- GEMINI_API_KEY 환경변수 필요
+- OPENALEX_API_KEY는 선택사항
         """
     )
 
 uploaded_file = st.file_uploader(
-    "1. 수요기술조사서 업로드", type=["pdf", "docx", "txt", "md"]
+    "1. 수요기술조사서 업로드",
+    type=["pdf", "docx", "txt", "md"]
 )
+
 manual_text = st.text_area(
     "2. 또는 기술 내용 직접 입력 (선택)",
     placeholder="기술 설명, 적용 분야, 핵심 성능, 장치/공정/소재 정보를 넣으면 연구자 매칭 정확도가 올라갑니다.",
