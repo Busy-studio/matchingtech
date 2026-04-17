@@ -13,8 +13,9 @@ from google.genai import types
 st.set_page_config(page_title="부산대 수요기술-연구자 매칭 시스템", layout="wide")
 
 OPENALEX_URL = "https://api.openalex.org/works"
-MAX_PAPERS = 15
+MAX_PAPERS = 20
 MAX_AUTHORS_FOR_ENRICH = 20
+MIN_RELEVANT_PAPERS = 3
 
 
 # -----------------------------
@@ -111,6 +112,11 @@ def extract_json_object(text: str) -> Dict:
     return {}
 
 
+def compact_text(text: str, limit: int = 4000) -> str:
+    text = (text or "").strip()
+    return text[:limit]
+
+
 # -----------------------------
 # File extraction
 # -----------------------------
@@ -139,7 +145,7 @@ def extract_text_from_uploaded_file(uploaded_file) -> str:
 
 
 # -----------------------------
-# Step 1. Keyword extraction
+# Step 1. Input parsing / keyword extraction
 # -----------------------------
 def extract_request_metadata(query_text: str) -> Dict[str, str]:
     company_name = "미확인"
@@ -162,7 +168,7 @@ def extract_request_metadata(query_text: str) -> Dict[str, str]:
 }}
 
 입력 텍스트:
-{query_text[:4000]}
+{compact_text(query_text)}
 """
 
     try:
@@ -180,58 +186,104 @@ def extract_request_metadata(query_text: str) -> Dict[str, str]:
     }
 
 
-def extract_keywords(query_text: str) -> Tuple[str, List[str]]:
-    fallback_keywords = []
-    for token in [x.strip() for x in query_text.replace("\n", " ").split() if x.strip()]:
-        if len(token) >= 4:
-            fallback_keywords.append(token)
-        if len(fallback_keywords) >= 4:
-            break
-
+def extract_search_profile(query_text: str) -> Dict:
     prompt = f"""
-당신은 대학 기술이전 담당자를 돕는 연구 키워드 추출기입니다.
-아래 기술 설명을 읽고 OpenAlex 논문 검색에 바로 쓸 수 있는 영어 기술 키워드 3~5개를 추출하세요.
+당신은 대학 산학협력용 논문 검색 프로파일 설계기입니다.
+아래 수요기술 설명을 읽고 OpenAlex 검색에 유리한 구조화 결과를 JSON으로 작성하세요.
+
+반드시 포함할 항목:
+1. core_tech: 핵심 기술 2~4개 (영어)
+2. materials_or_methods: 재료/공정/방식 2~4개 (영어)
+3. properties: 요구 성능/특성 2~4개 (영어)
+4. applications: 적용 산업/제품/도메인 1~3개 (영어)
+5. search_keywords: 실제 검색에 바로 쓸 핵심 키워드 4~6개 (영어, 짧은 구)
+6. exclude_keywords: 가능하면 배제하고 싶은 비관련 분야 0~4개 (영어)
+7. korean_summary: 한국어 한두 문장 요약
 
 규칙:
-1. 반드시 영어만 사용
-2. 너무 긴 문장 금지, 키워드/짧은 구 형태만 사용
-3. 산업/적용 도메인이 있으면 반영
-4. 재료, 공정, 장치, 응용 분야가 보이면 우선 반영
-5. 출력은 JSON만 반환
+- 반드시 영어 키워드 중심
+- 너무 긴 문장 금지
+- adhesive, coating, battery, marine, medical device처럼 명확한 기술명 우선
+- 적용 산업이 보이면 반드시 applications에 반영
+- 출력은 JSON만
 
 형식:
 {{
-  "keywords": ["keyword 1", "keyword 2", "keyword 3"]
+  "core_tech": ["..."],
+  "materials_or_methods": ["..."],
+  "properties": ["..."],
+  "applications": ["..."],
+  "search_keywords": ["..."],
+  "exclude_keywords": ["..."],
+  "korean_summary": "..."
 }}
 
-기술 설명:
-{query_text[:4000]}
+입력 텍스트:
+{compact_text(query_text)}
 """
+
+    fallback_tokens = []
+    for token in [x.strip(",.()[]{}") for x in query_text.replace("\n", " ").split() if x.strip()]:
+        if len(token) >= 4:
+            fallback_tokens.append(token)
+        if len(fallback_tokens) >= 5:
+            break
 
     try:
         res = safe_gemini_call(prompt)
         data = extract_json_object(getattr(res, "text", ""))
-        keywords = data.get("keywords", []) if isinstance(data, dict) else []
-        keywords = [str(k).strip() for k in keywords if str(k).strip()]
-        if keywords:
-            return ", ".join(keywords), keywords
+        if isinstance(data, dict):
+            for key in [
+                "core_tech",
+                "materials_or_methods",
+                "properties",
+                "applications",
+                "search_keywords",
+                "exclude_keywords",
+            ]:
+                data[key] = [str(x).strip() for x in data.get(key, []) if str(x).strip()]
+            data["korean_summary"] = str(data.get("korean_summary", "")).strip()
+            if data.get("search_keywords"):
+                return data
     except Exception:
         pass
 
-    fallback_keywords = fallback_keywords or ["Pusan National University"]
-    return ", ".join(fallback_keywords), fallback_keywords
+    fallback = [t for t in fallback_tokens if len(t) >= 4][:5]
+    return {
+        "core_tech": fallback[:2],
+        "materials_or_methods": fallback[2:4],
+        "properties": [],
+        "applications": [],
+        "search_keywords": fallback or ["Pusan National University"],
+        "exclude_keywords": [],
+        "korean_summary": "입력된 수요기술 설명을 바탕으로 검색용 키워드를 구성했습니다.",
+    }
+
+
+def format_keyword_text(search_profile: Dict) -> str:
+    keywords = search_profile.get("search_keywords", [])
+    return ", ".join(keywords)
 
 
 # -----------------------------
 # Step 2. OpenAlex search
 # -----------------------------
 @st.cache_data(show_spinner=False)
-def search_openalex(keywords: List[str]) -> List[Dict]:
+def search_openalex(search_keywords: Tuple[str, ...], applications: Tuple[str, ...], core_tech: Tuple[str, ...]) -> List[Dict]:
+    search_keywords = list(search_keywords)
+    applications = list(applications)
+    core_tech = list(core_tech)
+
+    base = search_keywords[:4] if search_keywords else core_tech[:3]
     queries = []
-    if keywords:
-        queries.append(" ".join(keywords[:3]) + " Pusan National University")
-        queries.append(" OR ".join(keywords[:3]) + " Pusan National University")
-        queries.append(" ".join(keywords[:2]))
+    if base:
+        queries.append(" ".join(base[:3]) + " Pusan National University")
+        queries.append(" OR ".join(base[:3]) + " Pusan National University")
+        queries.append(" ".join(base[:2]))
+    if core_tech and applications:
+        queries.append(f"{' '.join(core_tech[:2])} {' '.join(applications[:2])} Pusan National University")
+    if core_tech:
+        queries.append(" OR ".join(core_tech[:3]))
 
     seen_ids = set()
     collected = []
@@ -302,9 +354,114 @@ def filter_pnu_papers(raw_papers: List[Dict]) -> Tuple[List[Dict], List[str]]:
 
 
 # -----------------------------
-# Step 3. Author enrichment
+# Step 3. Paper relevance scoring
 # -----------------------------
-def enrich_authors_with_gemini(author_names: List[str], keywords_text: str, paper_titles: List[str]) -> Dict:
+def score_paper_relevance(valid_papers: List[Dict], search_profile: Dict, tech_summary: str) -> Dict[str, Dict]:
+    if not valid_papers:
+        return {}
+
+    paper_blocks = []
+    for i, p in enumerate(valid_papers, start=1):
+        abs_text = reconstruct_abstract(p.get("abstract_inverted_index"))
+        paper_blocks.append(
+            f"[{i}] Title: {p.get('title', '')}\nAbstract: {abs_text[:900]}\n"
+        )
+
+    prompt = f"""
+당신은 대학 산학협력용 논문 적합성 평가기입니다.
+아래 수요기술과 논문 목록을 비교하여, 각 논문이 수요기술과 실질적으로 얼마나 맞는지 평가하세요.
+
+수요기술 요약:
+{tech_summary}
+
+핵심 기술 프로파일:
+- core_tech: {search_profile.get('core_tech', [])}
+- materials_or_methods: {search_profile.get('materials_or_methods', [])}
+- properties: {search_profile.get('properties', [])}
+- applications: {search_profile.get('applications', [])}
+- exclude_keywords: {search_profile.get('exclude_keywords', [])}
+
+판정 기준:
+- High: 수요기술과 직접적으로 매우 관련
+- Medium: 인접 분야 또는 일부 핵심 요소가 일치
+- Low: 표면적으로만 비슷하거나 핵심이 다름
+- Exclude: 비관련 분야
+
+중요 규칙:
+1. 제목과 초록 기준으로 판단
+2. 재료/공정/성능/적용처 중 2개 이상 맞으면 Medium 이상 가능
+3. 적용처가 다르더라도 핵심 소재/공정/기술이 맞으면 Medium 가능
+4. 의료/생명/순수이론 등 수요와 명확히 벗어나면 Exclude
+5. 출력은 JSON만
+
+출력 형식:
+{{
+  "1": {{"relevance": "High/Medium/Low/Exclude", "score": 0-100, "reason": "한 줄 근거"}},
+  "2": {{"relevance": "High/Medium/Low/Exclude", "score": 0-100, "reason": "한 줄 근거"}}
+}}
+
+논문 목록:
+{chr(10).join(paper_blocks)}
+"""
+
+    try:
+        res = safe_gemini_call(prompt)
+        data = extract_json_object(getattr(res, "text", ""))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    fallback = {}
+    for i, _ in enumerate(valid_papers, start=1):
+        fallback[str(i)] = {
+            "relevance": "Medium",
+            "score": 60,
+            "reason": "자동 적합성 평가 실패로 기본값 적용",
+        }
+    return fallback
+
+
+def select_relevant_papers(valid_papers: List[Dict], relevance_map: Dict[str, Dict]) -> List[Dict]:
+    selected = []
+    medium_candidates = []
+
+    for i, p in enumerate(valid_papers, start=1):
+        rel = relevance_map.get(str(i), {}) if isinstance(relevance_map, dict) else {}
+        label = str(rel.get("relevance", "Medium")).strip()
+        try:
+            score = int(rel.get("score", 60))
+        except Exception:
+            score = 60
+        reason = str(rel.get("reason", "")).strip()
+        p["paper_relevance"] = label
+        p["paper_score"] = score
+        p["paper_reason"] = reason
+
+        if label == "High":
+            selected.append(p)
+        elif label == "Medium":
+            medium_candidates.append(p)
+
+    selected.extend(sorted(medium_candidates, key=lambda x: x.get("paper_score", 0), reverse=True))
+
+    if len(selected) < MIN_RELEVANT_PAPERS:
+        low_pool = []
+        for i, p in enumerate(valid_papers, start=1):
+            if p in selected:
+                continue
+            label = p.get("paper_relevance", "")
+            if label == "Low":
+                low_pool.append(p)
+        selected.extend(sorted(low_pool, key=lambda x: x.get("paper_score", 0), reverse=True)[: MIN_RELEVANT_PAPERS - len(selected)])
+
+    return selected[:MAX_PAPERS]
+
+
+# -----------------------------
+# Step 4. Author enrichment
+# -----------------------------
+def enrich_authors_with_gemini(author_names: List[str], search_profile: Dict, paper_titles: List[str]) -> Dict:
     if not author_names:
         return {}
 
@@ -328,8 +485,11 @@ relevance 기준:
 대상 저자:
 {author_names}
 
-논문 주제 키워드:
-{keywords_text}
+수요기술 프로파일:
+- core_tech: {search_profile.get('core_tech', [])}
+- materials_or_methods: {search_profile.get('materials_or_methods', [])}
+- properties: {search_profile.get('properties', [])}
+- applications: {search_profile.get('applications', [])}
 
 참고 논문 제목:
 {paper_titles[:20]}
@@ -362,7 +522,7 @@ relevance 기준:
 
 
 # -----------------------------
-# Step 4. Paper summary
+# Step 5. Paper summary
 # -----------------------------
 def summarize_papers(valid_papers: List[Dict]) -> Dict[str, Dict[str, str]]:
     if not valid_papers:
@@ -404,7 +564,7 @@ def summarize_papers(valid_papers: List[Dict]) -> Dict[str, Dict[str, str]]:
 
 
 # -----------------------------
-# Step 5. Assemble result
+# Step 6. Assemble result
 # -----------------------------
 def build_professor_map(valid_papers: List[Dict], author_db: Dict, parsed_results: Dict) -> Dict:
     professor_map = {}
@@ -418,6 +578,9 @@ def build_professor_map(valid_papers: List[Dict], author_db: Dict, parsed_result
             "summary": info.get("sum", "요약 없음"),
             "date": p.get("publication_date", "날짜 미상"),
             "venue": p.get("venue", "게재처 미상"),
+            "paper_relevance": p.get("paper_relevance", "Unknown"),
+            "paper_score": p.get("paper_score", 0),
+            "paper_reason": p.get("paper_reason", ""),
         }
 
         for name, is_pnu in p.get("raw_authors_info", []):
@@ -428,12 +591,6 @@ def build_professor_map(valid_papers: List[Dict], author_db: Dict, parsed_result
             active = normalize_yes_no(db.get("is_active", "Unknown"))
             relevance = (db.get("relevance") or "Unknown").strip()
 
-            # 핵심 완화 포인트:
-            # 1) 재직 No만 확실히 제외
-            # 2) 재직 Yes면 relevance가 Medium/High는 우선 포함
-            # 3) 재직 Yes + relevance Unknown도 포함
-            # 4) author enrichment가 아예 실패했더라도 논문 저자명은 provisional 후보로 유지하지 않고,
-            #    사용자 요구에 맞춰 '현직 여부를 확인한 경우'만 출력
             if active == "No":
                 continue
             if active != "Yes":
@@ -455,6 +612,12 @@ def build_professor_map(valid_papers: List[Dict], author_db: Dict, parsed_result
             if paper_obj not in professor_map[name]["papers"]:
                 professor_map[name]["papers"].append(paper_obj)
 
+    for _, data in professor_map.items():
+        data["papers"] = sorted(
+            data["papers"],
+            key=lambda x: (0 if x.get("paper_relevance") == "High" else 1, -int(x.get("paper_score", 0))),
+        )
+
     return professor_map
 
 
@@ -466,32 +629,60 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
         return "분석할 내용이 없습니다. 파일을 업로드하거나 내용을 입력해주세요."
 
     request_meta = extract_request_metadata(query_text)
-    keywords_text, keywords = extract_keywords(query_text)
-    raw_papers = search_openalex(keywords)
-    valid_papers, unique_pnu_authors = filter_pnu_papers(raw_papers)
+    search_profile = extract_search_profile(query_text)
+    if not request_meta.get("tech_summary") and search_profile.get("korean_summary"):
+        request_meta["tech_summary"] = search_profile.get("korean_summary")
 
-    if not valid_papers:
+    keywords_text = format_keyword_text(search_profile)
+    raw_papers = search_openalex(
+        tuple(search_profile.get("search_keywords", [])),
+        tuple(search_profile.get("applications", [])),
+        tuple(search_profile.get("core_tech", [])),
+    )
+    pnu_papers, unique_pnu_authors = filter_pnu_papers(raw_papers)
+
+    if not pnu_papers:
         return (
+            f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**\n\n"
+            f"### 📝 수요기술 요약\n{request_meta.get('tech_summary', '입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.')}\n\n"
             f"### 🔍 분석 키워드: **{keywords_text}**\n\n"
             "- OpenAlex에서 부산대 소속 논문을 찾지 못했습니다.\n"
             "- 기술 설명을 더 구체적으로 입력하거나, 영문 기술명/응용 분야를 함께 넣어보세요."
         )
 
+    relevance_map = score_paper_relevance(pnu_papers, search_profile, request_meta.get("tech_summary", ""))
+    valid_papers = select_relevant_papers(pnu_papers, relevance_map)
+
+    if not valid_papers:
+        valid_papers = pnu_papers[:MIN_RELEVANT_PAPERS]
+
+    filtered_authors = []
+    seen_filtered_authors = set()
+    for p in valid_papers:
+        for name, is_pnu in p.get("raw_authors_info", []):
+            if is_pnu and name not in seen_filtered_authors:
+                seen_filtered_authors.add(name)
+                filtered_authors.append(name)
+
     paper_titles = [p.get("title", "") for p in valid_papers]
-    author_db = enrich_authors_with_gemini(unique_pnu_authors, keywords_text, paper_titles)
+    author_db = enrich_authors_with_gemini(filtered_authors[:MAX_AUTHORS_FOR_ENRICH], search_profile, paper_titles)
     parsed_results = summarize_papers(valid_papers)
     professor_map = build_professor_map(valid_papers, author_db, parsed_results)
+
+    high_count = sum(1 for p in valid_papers if p.get("paper_relevance") == "High")
+    medium_count = sum(1 for p in valid_papers if p.get("paper_relevance") == "Medium")
 
     final_output = []
     final_output.append(f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**")
     final_output.append("")
-    final_output.append(f"### 📝 수요기술 요약")
-    final_output.append(f"{request_meta.get('tech_summary', '입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.')}")
+    final_output.append("### 📝 수요기술 요약")
+    final_output.append(request_meta.get("tech_summary", "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다."))
     final_output.append("")
     final_output.append(f"### 🔍 분석 키워드: **{keywords_text}**")
     final_output.append("")
-    final_output.append(f"- 검토 논문 수: **{len(valid_papers)}건**")
-    final_output.append(f"- 검토 부산대 저자 수: **{len(unique_pnu_authors)}명**")
+    final_output.append(f"- 검토 논문 수: **{len(pnu_papers)}건**")
+    final_output.append(f"- 적합성 통과 논문 수: **{len(valid_papers)}건** (High {high_count}건 / Medium {medium_count}건)")
+    final_output.append(f"- 검토 부산대 저자 수: **{len(filtered_authors)}명**")
     final_output.append(f"- 최종 매칭 교수 수: **{len(professor_map)}명**")
     final_output.append("")
     final_output.append("---")
@@ -500,6 +691,7 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
         final_output.append("현재 부산대학교 재직 전임교원으로 확인된 후보가 없거나, 교수 정보 확인이 충분하지 않았습니다.")
         final_output.append("")
         final_output.append("#### 점검 포인트")
+        final_output.append("- 논문 적합성 검증 후 교수 후보 풀이 좁아진 경우")
         final_output.append("- OpenAlex에 교수명이 아니라 학생/연구원 이름 위주로 잡힌 경우")
         final_output.append("- Gemini 검색에서 교수 정보 확인이 충분히 되지 않은 경우")
         final_output.append("- 입력 기술 설명이 너무 짧거나 일반적이라 연관 논문이 넓게 잡힌 경우")
@@ -507,13 +699,16 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
 
     sorted_professors = sorted(
         professor_map.items(),
-        key=lambda x: (0 if x[1].get("relevance") == "High" else 1, -len(x[1].get("papers", []))),
+        key=lambda x: (
+            0 if x[1].get("relevance") == "High" else 1,
+            -sum(int(p.get("paper_score", 0)) for p in x[1].get("papers", [])),
+        ),
     )
 
     for eng_name, data in sorted_professors:
         final_output.append(f"## 🏫 {data['dept']} | {data['k_name']} 교수 ({eng_name})")
         final_output.append(f"- **주요 연구분야:** {data['field']}")
-        final_output.append(f"- **적합도:** {data.get('relevance', 'Unknown')}")
+        final_output.append(f"- **교수 적합도:** {data.get('relevance', 'Unknown')}")
         if data.get("note"):
             final_output.append(f"- **판단 메모:** {data['note']}")
         final_output.append(f"- **학과/연구실 홈페이지:** [링크 바로가기]({data['link']})")
@@ -522,6 +717,9 @@ def unified_analyze(uploaded_file, manual_text: str) -> str:
         for idx, paper in enumerate(data["papers"], start=1):
             final_output.append(f"{idx}. **{paper['k_title']}**")
             final_output.append(f"   - 원제: {paper['title']}")
+            final_output.append(f"   - 논문 적합도: {paper.get('paper_relevance', 'Unknown')} ({paper.get('paper_score', 0)}점)")
+            if paper.get("paper_reason"):
+                final_output.append(f"   - 적합성 근거: {paper['paper_reason']}")
             final_output.append(f"   - 요약: {paper['summary']} ({paper['date']}, {paper['venue']})")
         final_output.append("")
         final_output.append("---")
