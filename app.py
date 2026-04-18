@@ -1,21 +1,40 @@
 import os
+import re
 import json
 import time
-from typing import Dict, List, Tuple
+import html
+from typing import Dict, List, Tuple, Optional
+from urllib.parse import urlparse
+import xml.etree.ElementTree as ET
 
 import requests
 import pdfplumber
 import streamlit as st
+from bs4 import BeautifulSoup
 from docx import Document
 from google import genai
-from google.genai import types
 
-st.set_page_config(page_title="부산대 수요기술-연구자 매칭 시스템", layout="wide")
+st.set_page_config(page_title="부산대 수요기술-연구자 증거형 매칭 시스템", layout="wide")
 
 OPENALEX_URL = "https://api.openalex.org/works"
+KIPRIS_BASE_URL = "https://plus.kipris.or.kr/kipo-api/kipi/patUtiModInfoSearchSevice"
 MAX_PAPERS = 20
-MAX_AUTHORS_FOR_ENRICH = 20
+MAX_PATENTS = 20
+MAX_AUTHORS = 30
 MIN_RELEVANT_PAPERS = 3
+MIN_RELEVANT_PATENTS = 3
+USER_AGENT = "Mozilla/5.0 (EvidenceOnlyPNUMatcher/1.1)"
+REQUEST_TIMEOUT = 20
+OFFICIAL_DOMAINS = [
+    "pusan.ac.kr",
+    "pnu.edu",
+]
+PNU_IUCF_APPLICANT_KR = "부산대학교 산학협력단"
+PNU_IUCF_APPLICANT_EN_HINTS = [
+    "industry-university cooperation foundation",
+    "industry academic cooperation foundation",
+    "industry university cooperation foundation",
+]
 
 
 # -----------------------------
@@ -27,8 +46,10 @@ def get_env(name: str, default: str = "") -> str:
 
 GEMINI_API_KEY = get_env("GEMINI_API_KEY")
 OPENALEX_API_KEY = get_env("OPENALEX_API_KEY")
+KIPRIS_API_KEY = get_env("KIPRIS_API_KEY")
 
 
+@st.cache_resource(show_spinner=False)
 def init_client():
     if not GEMINI_API_KEY:
         return None
@@ -36,41 +57,21 @@ def init_client():
 
 
 client = init_client()
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": USER_AGENT})
 
 
 # -----------------------------
 # Utilities
 # -----------------------------
-def safe_gemini_call(prompt: str, config=None, retries: int = 3):
-    if client is None:
-        raise RuntimeError("GEMINI_API_KEY가 설정되어 있지 않습니다.")
-
-    models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
-    last_error = None
-
-    for model_name in models:
-        for attempt in range(retries):
-            try:
-                return client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=config,
-                )
-            except Exception as e:
-                last_error = e
-                if any(code in str(e) for code in ["429", "503"]) and attempt < retries - 1:
-                    time.sleep(2)
-                    continue
-                break
-
-    raise RuntimeError(f"Gemini 호출 실패: {last_error}")
+def compact_text(text: str, limit: int = 5000) -> str:
+    return (text or "").strip()[:limit]
 
 
 @st.cache_data(show_spinner=False)
 def reconstruct_abstract(inverted_index):
     if not inverted_index:
-        return "초록 정보가 없습니다."
-
+        return ""
     word_index = []
     for word, positions in inverted_index.items():
         for pos in positions:
@@ -80,22 +81,11 @@ def reconstruct_abstract(inverted_index):
 
 
 @st.cache_data(show_spinner=False)
-def normalize_yes_no(value: str) -> str:
-    v = (value or "").strip().lower()
-    if v in {"yes", "y", "true", "재직", "현직", "예"}:
-        return "Yes"
-    if v in {"no", "n", "false", "비재직", "아니오"}:
-        return "No"
-    return "Unknown"
-
-
-@st.cache_data(show_spinner=False)
 def extract_json_object(text: str) -> Dict:
-    text = (text or "").strip()
-    if not text:
+    raw = (text or "").strip()
+    if not raw:
         return {}
-
-    cleaned = text.replace("```json", "").replace("```", "").strip()
+    cleaned = raw.replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(cleaned)
     except Exception:
@@ -112,9 +102,48 @@ def extract_json_object(text: str) -> Dict:
     return {}
 
 
-def compact_text(text: str, limit: int = 4000) -> str:
-    text = (text or "").strip()
-    return text[:limit]
+def safe_gemini_json(prompt: str, retries: int = 2) -> Dict:
+    if client is None:
+        return {}
+    for model_name in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+        for attempt in range(retries):
+            try:
+                res = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                return extract_json_object(getattr(res, "text", ""))
+            except Exception as e:
+                if any(code in str(e) for code in ["429", "503"]) and attempt < retries - 1:
+                    time.sleep(2)
+                    continue
+                break
+    return {}
+
+
+def normalize_space(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+@st.cache_data(show_spinner=False)
+def file_text(uploaded_file) -> str:
+    if uploaded_file is None:
+        return ""
+    ext = os.path.splitext(uploaded_file.name)[1].lower()
+    text = ""
+    try:
+        if ext == ".pdf":
+            with pdfplumber.open(uploaded_file) as pdf:
+                for page in pdf.pages:
+                    text += (page.extract_text() or "") + "\n"
+        elif ext == ".docx":
+            doc = Document(uploaded_file)
+            text = "\n".join(p.text for p in doc.paragraphs)
+        elif ext in {".txt", ".md"}:
+            text = uploaded_file.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    return text
 
 
 def clamp_score(value, default=60):
@@ -125,188 +154,175 @@ def clamp_score(value, default=60):
     return max(0, min(100, score))
 
 
-def label_rank(label: str) -> int:
-    order = {
-        "High": 0,
-        "Medium": 1,
-        "Unknown": 2,
-        "Low": 3,
-        "Exclude": 4,
-    }
-    return order.get(label, 9)
+def split_people_text(text: str) -> List[str]:
+    if not text:
+        return []
+    parts = re.split(r"[;,/]|\s{2,}|\n|\||·|ㆍ", text)
+    cleaned = []
+    seen = set()
+    for part in parts:
+        p = normalize_space(part)
+        p = re.sub(r"\(.*?\)", "", p).strip()
+        if not p or len(p) < 2:
+            continue
+        if p not in seen:
+            seen.add(p)
+            cleaned.append(p)
+    return cleaned
+
+
+def safe_lower(x) -> str:
+    return str(x or "").lower()
+
+
+def escape_xml_text(text: str) -> str:
+    return html.escape(str(text or ""), quote=True)
+
+
+def extract_texts_by_tag(root: ET.Element, tag_name: str) -> List[str]:
+    values = []
+    for elem in root.iter():
+        if elem.tag.split('}')[-1] == tag_name:
+            val = normalize_space(elem.text or "")
+            if val:
+                values.append(val)
+    return values
+
+
+def first_text_by_tags(root: ET.Element, candidates: List[str]) -> str:
+    for name in candidates:
+        vals = extract_texts_by_tag(root, name)
+        if vals:
+            return vals[0]
+    return ""
+
+
+def unique_keep_order(items: List[str]) -> List[str]:
+    out, seen = [], set()
+    for item in items:
+        key = normalize_space(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
 
 
 # -----------------------------
-# File extraction
-# -----------------------------
-def extract_text_from_uploaded_file(uploaded_file) -> str:
-    if uploaded_file is None:
-        return ""
-
-    file_ext = os.path.splitext(uploaded_file.name)[1].lower()
-    text = ""
-
-    try:
-        if file_ext == ".pdf":
-            with pdfplumber.open(uploaded_file) as pdf:
-                for page in pdf.pages:
-                    text += (page.extract_text() or "") + "\n"
-        elif file_ext == ".docx":
-            doc = Document(uploaded_file)
-            for para in doc.paragraphs:
-                text += para.text + "\n"
-        elif file_ext in {".txt", ".md"}:
-            text = uploaded_file.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
-
-    return text
-
-
-# -----------------------------
-# Step 1. Input parsing / keyword extraction
+# Input parsing
 # -----------------------------
 def extract_request_metadata(query_text: str) -> Dict[str, str]:
-    company_name = "미확인"
-    tech_summary = "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다."
-
     prompt = f"""
-당신은 대학 기술이전 실무용 입력정보 정리기입니다.
-아래 텍스트에서 다음 두 항목만 추출하세요.
+당신은 대학 산학협력 실무용 입력정보 정리기입니다.
+아래 텍스트에서 기업명과 수요기술 요약만 JSON으로 추출하세요.
 
 규칙:
-1. 기업명은 명확히 보일 때만 추출, 없으면 "미확인"
-2. 수요기술 요약은 한국어 1~2문장, 너무 길지 않게
-3. 과장 없이 소재, 공정, 장치, 성능, 적용처 중심으로 요약
-4. 출력은 JSON만 반환
-
-형식:
-{{
-  "company_name": "기업명 또는 미확인",
-  "tech_summary": "수요기술 요약"
-}}
-
-입력 텍스트:
-{compact_text(query_text)}
-"""
-
-    try:
-        res = safe_gemini_call(prompt)
-        data = extract_json_object(getattr(res, "text", ""))
-        if isinstance(data, dict):
-            company_name = str(data.get("company_name", company_name)).strip() or company_name
-            tech_summary = str(data.get("tech_summary", tech_summary)).strip() or tech_summary
-    except Exception:
-        pass
-
-    return {
-        "company_name": company_name,
-        "tech_summary": tech_summary,
-    }
-
-
-def extract_search_profile(query_text: str) -> Dict:
-    prompt = f"""
-당신은 대학 산학협력용 논문 검색 프로파일 설계기입니다.
-아래 수요기술 설명을 읽고 OpenAlex 검색에 유리한 구조화 결과를 JSON으로 작성하세요.
-
-반드시 포함할 항목:
-1. core_tech: 핵심 기술 2~4개 (영어)
-2. materials_or_methods: 재료/공정/방식 2~4개 (영어)
-3. properties: 요구 성능/특성 2~4개 (영어)
-4. applications: 적용 산업/제품/도메인 1~3개 (영어)
-5. search_keywords: 실제 검색에 바로 쓸 핵심 키워드 4~6개 (영어, 짧은 구)
-6. exclude_keywords: 가능하면 배제하고 싶은 비관련 분야 0~4개 (영어)
-7. korean_summary: 한국어 한두 문장 요약
-
-규칙:
-- 반드시 영어 키워드 중심
-- 너무 긴 문장 금지
-- adhesive, coating, battery, marine, medical device처럼 명확한 기술명 우선
-- 적용 산업이 보이면 반드시 applications에 반영
+- 기업명이 명확하지 않으면 \"미확인\"
+- 수요기술 요약은 한국어 1~2문장
+- 과장 없이 핵심 기술/성능/적용처 중심
 - 출력은 JSON만
 
 형식:
 {{
-  "core_tech": ["..."],
-  "materials_or_methods": ["..."],
-  "properties": ["..."],
-  "applications": ["..."],
-  "search_keywords": ["..."],
-  "exclude_keywords": ["..."],
-  "korean_summary": "..."
+  \"company_name\": \"기업명 또는 미확인\",
+  \"tech_summary\": \"수요기술 요약\"
 }}
 
-입력 텍스트:
+입력:
 {compact_text(query_text)}
 """
+    data = safe_gemini_json(prompt)
+    return {
+        "company_name": str(data.get("company_name") or "미확인").strip() or "미확인",
+        "tech_summary": str(data.get("tech_summary") or "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.").strip(),
+    }
 
+
+def extract_search_profile(query_text: str) -> Dict:
     fallback_tokens = []
     for token in [x.strip(",.()[]{}") for x in query_text.replace("\n", " ").split() if x.strip()]:
         if len(token) >= 4:
             fallback_tokens.append(token)
-        if len(fallback_tokens) >= 5:
+        if len(fallback_tokens) >= 6:
             break
 
-    try:
-        res = safe_gemini_call(prompt)
-        data = extract_json_object(getattr(res, "text", ""))
-        if isinstance(data, dict):
-            for key in [
-                "core_tech",
-                "materials_or_methods",
-                "properties",
-                "applications",
-                "search_keywords",
-                "exclude_keywords",
-            ]:
-                data[key] = [str(x).strip() for x in data.get(key, []) if str(x).strip()]
-            data["korean_summary"] = str(data.get("korean_summary", "")).strip()
-            if data.get("search_keywords"):
-                return data
-    except Exception:
-        pass
+    prompt = f"""
+당신은 대학 산학협력용 검색 프로파일 설계기입니다.
+아래 수요기술 설명을 바탕으로 논문/특허 검색용 키워드 JSON을 작성하세요.
 
-    fallback = [t for t in fallback_tokens if len(t) >= 4][:5]
+반드시 포함할 항목:
+- core_tech: 핵심 기술 2~4개 (영어)
+- materials_or_methods: 재료/방법 2~4개 (영어)
+- properties: 요구 특성 1~4개 (영어)
+- applications: 적용처 1~3개 (영어)
+- search_keywords: 검색용 핵심 키워드 4~6개 (영어 짧은 구)
+- korean_patent_keywords: 특허 검색용 한국어 핵심 키워드 4~8개
+- exclude_keywords: 배제 키워드 0~4개 (영어)
+- korean_summary: 한국어 한두 문장
+
+출력은 JSON만 반환.
+
+입력:
+{compact_text(query_text)}
+"""
+    data = safe_gemini_json(prompt)
+    if isinstance(data, dict) and data.get("search_keywords"):
+        for key in [
+            "core_tech",
+            "materials_or_methods",
+            "properties",
+            "applications",
+            "search_keywords",
+            "exclude_keywords",
+            "korean_patent_keywords",
+        ]:
+            data[key] = [str(x).strip() for x in data.get(key, []) if str(x).strip()]
+        data["korean_summary"] = str(data.get("korean_summary", "")).strip()
+        return data
+
+    fallback = [t for t in fallback_tokens if len(t) >= 2][:6]
     return {
         "core_tech": fallback[:2],
         "materials_or_methods": fallback[2:4],
         "properties": [],
         "applications": [],
         "search_keywords": fallback or ["Pusan National University"],
+        "korean_patent_keywords": fallback or ["부산대학교"],
         "exclude_keywords": [],
-        "korean_summary": "입력된 수요기술 설명을 바탕으로 검색용 키워드를 구성했습니다.",
+        "korean_summary": "입력된 수요기술 설명을 바탕으로 검색 키워드를 구성했습니다.",
     }
 
 
-def format_keyword_text(search_profile: Dict) -> str:
-    keywords = search_profile.get("search_keywords", [])
-    return ", ".join(keywords)
+def format_keyword_text(profile: Dict) -> str:
+    return ", ".join(profile.get("search_keywords", []))
+
+
+def format_patent_keyword_text(profile: Dict) -> str:
+    return ", ".join(profile.get("korean_patent_keywords", []))
 
 
 # -----------------------------
-# Step 2. OpenAlex search
+# OpenAlex search / relevance
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def search_openalex(search_keywords: Tuple[str, ...], applications: Tuple[str, ...], core_tech: Tuple[str, ...]) -> List[Dict]:
-    search_keywords = list(search_keywords)
-    applications = list(applications)
-    core_tech = list(core_tech)
+    keywords = list(search_keywords)
+    apps = list(applications)
+    techs = list(core_tech)
 
-    base = search_keywords[:4] if search_keywords else core_tech[:3]
     queries = []
+    base = keywords[:4] if keywords else techs[:3]
     if base:
         queries.append(" ".join(base[:3]) + " Pusan National University")
         queries.append(" OR ".join(base[:3]) + " Pusan National University")
         queries.append(" ".join(base[:2]))
-    if core_tech and applications:
-        queries.append(f"{' '.join(core_tech[:2])} {' '.join(applications[:2])} Pusan National University")
-    if core_tech:
-        queries.append(" OR ".join(core_tech[:3]))
+    if techs and apps:
+        queries.append(f"{' '.join(techs[:2])} {' '.join(apps[:2])} Pusan National University")
+    if techs:
+        queries.append(" OR ".join(techs[:3]))
 
-    seen_ids = set()
+    seen = set()
     collected = []
-
     for q in queries:
         params = {
             "search": q,
@@ -316,22 +332,20 @@ def search_openalex(search_keywords: Tuple[str, ...], applications: Tuple[str, .
         }
         if OPENALEX_API_KEY:
             params["api_key"] = OPENALEX_API_KEY
-
         try:
-            res = requests.get(OPENALEX_URL, params=params, timeout=30)
-            if res.status_code != 200:
+            r = SESSION.get(OPENALEX_URL, params=params, timeout=REQUEST_TIMEOUT)
+            if r.status_code != 200:
                 continue
-            items = res.json().get("results", [])
+            items = r.json().get("results", [])
         except Exception:
             continue
 
         for item in items:
             item_id = item.get("id") or item.get("title")
-            if item_id in seen_ids:
+            if item_id in seen:
                 continue
-            seen_ids.add(item_id)
+            seen.add(item_id)
             collected.append(item)
-
     return collected
 
 
@@ -345,26 +359,15 @@ def filter_pnu_papers(raw_papers: List[Dict]) -> Tuple[List[Dict], List[str]]:
         p_authors_info = []
         is_pnu_paper = False
 
-        authorships = p.get("authorships") or []
-        for authorship in authorships:
+        for authorship in p.get("authorships") or []:
             authorship = authorship or {}
-
-            author_obj = authorship.get("author") or {}
-            name = str(author_obj.get("display_name") or "Unknown")
-
+            name = str((authorship.get("author") or {}).get("display_name") or "Unknown")
             institutions = authorship.get("institutions") or []
-            insts = []
-            for inst in institutions:
-                inst = inst or {}
-                inst_name = str(inst.get("display_name") or "").lower()
-                insts.append(inst_name)
-
-            raw_affil = str(authorship.get("raw_affiliation_string") or "").lower()
-            combined = " ".join(insts) + " " + raw_affil
-
+            inst_names = [safe_lower((inst or {}).get("display_name")) for inst in institutions]
+            raw_aff = safe_lower(authorship.get("raw_affiliation_string"))
+            combined = " ".join(inst_names) + " " + raw_aff
             is_pnu = any(k in combined for k in ["pusan national", "busan national", "부산대"])
             p_authors_info.append((name, is_pnu))
-
             if is_pnu:
                 is_pnu_paper = True
                 if name not in seen_authors:
@@ -377,270 +380,505 @@ def filter_pnu_papers(raw_papers: List[Dict]) -> Tuple[List[Dict], List[str]]:
             p["venue"] = str(source.get("display_name") or "게재처 미상")
             p["raw_authors_info"] = p_authors_info
             valid_papers.append(p)
-
         if len(valid_papers) >= MAX_PAPERS:
             break
 
-    return valid_papers, unique_pnu_authors[:MAX_AUTHORS_FOR_ENRICH]
+    return valid_papers, unique_pnu_authors[:MAX_AUTHORS]
 
 
-# -----------------------------
-# Step 3. Paper relevance scoring
-# -----------------------------
-def score_paper_relevance(valid_papers: List[Dict], search_profile: Dict, tech_summary: str) -> Dict[str, Dict]:
+def score_paper_relevance(valid_papers: List[Dict], profile: Dict, tech_summary: str) -> Dict[str, Dict]:
     if not valid_papers:
         return {}
-
-    paper_blocks = []
+    blocks = []
     for i, p in enumerate(valid_papers, start=1):
         abs_text = reconstruct_abstract(p.get("abstract_inverted_index"))
-        paper_blocks.append(
-            f"[{i}] Title: {p.get('title', '')}\nAbstract: {abs_text[:900]}\n"
-        )
+        blocks.append(f"[{i}] Title: {p.get('title', '')}\nAbstract: {abs_text[:900]}\n")
 
     prompt = f"""
 당신은 대학 산학협력용 논문 적합성 평가기입니다.
-아래 수요기술과 논문 목록을 비교하여, 각 논문이 수요기술과 실질적으로 얼마나 맞는지 평가하세요.
+아래 수요기술과 논문 목록을 비교해 각 논문의 적합도를 JSON으로 반환하세요.
 
 수요기술 요약:
 {tech_summary}
 
-핵심 기술 프로파일:
-- core_tech: {search_profile.get('core_tech', [])}
-- materials_or_methods: {search_profile.get('materials_or_methods', [])}
-- properties: {search_profile.get('properties', [])}
-- applications: {search_profile.get('applications', [])}
-- exclude_keywords: {search_profile.get('exclude_keywords', [])}
+프로파일:
+- core_tech: {profile.get('core_tech', [])}
+- materials_or_methods: {profile.get('materials_or_methods', [])}
+- properties: {profile.get('properties', [])}
+- applications: {profile.get('applications', [])}
+- exclude_keywords: {profile.get('exclude_keywords', [])}
 
-판정 기준:
-- High: 수요기술과 직접적으로 매우 관련
-- Medium: 인접 분야 또는 일부 핵심 요소가 일치
-- Low: 표면적으로만 비슷하거나 핵심이 다름
-- Exclude: 비관련 분야
-
-중요 규칙:
-1. 제목과 초록 기준으로 판단
-2. 재료/공정/성능/적용처 중 2개 이상 맞으면 Medium 이상 가능
-3. 적용처가 다르더라도 핵심 소재/공정/기술이 맞으면 Medium 가능
-4. 의료/생명/순수이론 등 수요와 명확히 벗어나면 Exclude
-5. 출력은 JSON만
+등급:
+- High: 직접 관련
+- Medium: 인접 관련
+- Low: 부분적 관련
+- Exclude: 비관련
 
 출력 형식:
 {{
-  "1": {{"relevance": "High/Medium/Low/Exclude", "score": 0-100, "reason": "한 줄 근거"}},
-  "2": {{"relevance": "High/Medium/Low/Exclude", "score": 0-100, "reason": "한 줄 근거"}}
+  "1": {{"relevance": "High/Medium/Low/Exclude", "score": 0-100, "reason": "한 줄 근거"}}
 }}
 
 논문 목록:
-{chr(10).join(paper_blocks)}
+{chr(10).join(blocks)}
 """
-
-    try:
-        res = safe_gemini_call(prompt)
-        data = extract_json_object(getattr(res, "text", ""))
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-
+    data = safe_gemini_json(prompt)
+    if isinstance(data, dict) and data:
+        return data
     fallback = {}
     for i, _ in enumerate(valid_papers, start=1):
-        fallback[str(i)] = {
-            "relevance": "Medium",
-            "score": 60,
-            "reason": "자동 적합성 평가 실패로 기본값 적용",
-        }
+        fallback[str(i)] = {"relevance": "Medium", "score": 60, "reason": "적합성 평가 실패로 기본값 적용"}
     return fallback
 
 
 def select_relevant_papers(valid_papers: List[Dict], relevance_map: Dict[str, Dict]) -> List[Dict]:
     selected = []
-    medium_candidates = []
-
+    medium = []
+    low = []
     for i, p in enumerate(valid_papers, start=1):
         rel = relevance_map.get(str(i), {}) if isinstance(relevance_map, dict) else {}
         label = str(rel.get("relevance", "Medium")).strip()
-        score = clamp_score(rel.get("score", 60), default=60)
+        score = clamp_score(rel.get("score", 60), 60)
         reason = str(rel.get("reason", "")).strip()
-
         p["paper_relevance"] = label
         p["paper_score"] = score
         p["paper_reason"] = reason
-
         if label == "High":
             selected.append(p)
         elif label == "Medium":
-            medium_candidates.append(p)
-
-    selected.extend(sorted(medium_candidates, key=lambda x: x.get("paper_score", 0), reverse=True))
-
+            medium.append(p)
+        elif label == "Low":
+            low.append(p)
+    selected.extend(sorted(medium, key=lambda x: x.get("paper_score", 0), reverse=True))
     if len(selected) < MIN_RELEVANT_PAPERS:
-        low_pool = []
-        for p in valid_papers:
-            if p in selected:
-                continue
-            if p.get("paper_relevance", "") == "Low":
-                low_pool.append(p)
-
-        selected.extend(
-            sorted(low_pool, key=lambda x: x.get("paper_score", 0), reverse=True)[
-                : MIN_RELEVANT_PAPERS - len(selected)
-            ]
-        )
-
+        selected.extend(sorted(low, key=lambda x: x.get("paper_score", 0), reverse=True)[:MIN_RELEVANT_PAPERS - len(selected)])
     return selected[:MAX_PAPERS]
 
 
 # -----------------------------
-# Step 4. Author enrichment
+# KIPRIS patent search / detail
 # -----------------------------
-def enrich_authors_with_gemini(author_names: List[str], search_profile: Dict, paper_titles: List[str]) -> Dict:
-    if not author_names:
-        return {}
+def kipris_enabled() -> bool:
+    return bool(KIPRIS_API_KEY)
 
-    prompt = f"""
-당신은 부산대학교 교수 검색 보조 시스템입니다.
-아래 영문 저자명이 현재 부산대학교 전임교원인지 확인하고, 맞다면 학과/연구분야/홈페이지를 찾아주세요.
 
-중요 규칙:
-1. 반드시 '현재 부산대학교 재직 전임교원'인 경우만 is_active를 Yes로 표시
-2. 확실하지 않으면 No가 아니라 Unknown으로 표시
-3. 논문 주제와 학과가 어느 정도 연결되면 relevance를 Medium 이상으로 판단
-4. 너무 엄격하게 자르지 말고, 기계/전기/재료/조선/의생명처럼 인접 분야면 Medium 가능
-5. 출력은 JSON만 반환
-
-relevance 기준:
-- High: 논문 주제와 교수 연구분야가 직접 일치
-- Medium: 인접 분야로 충분히 연관
-- Low: 연관성이 약함
-- Unknown: 정보 부족
-
-대상 저자:
-{author_names}
-
-수요기술 프로파일:
-- core_tech: {search_profile.get('core_tech', [])}
-- materials_or_methods: {search_profile.get('materials_or_methods', [])}
-- properties: {search_profile.get('properties', [])}
-- applications: {search_profile.get('applications', [])}
-
-참고 논문 제목:
-{paper_titles[:20]}
-
-출력 형식:
-{{
-  "영문이름": {{
-    "korean_name": "성함",
-    "department": "학과",
-    "field": "주요 연구분야",
-    "link": "홈페이지URL",
-    "is_active": "Yes/No/Unknown",
-    "relevance": "High/Medium/Low/Unknown",
-    "note": "판단 근거 한 줄"
-  }}
-}}
-"""
-
+@st.cache_data(show_spinner=False)
+def kipris_call(operation: str, params: Tuple[Tuple[str, str], ...]) -> Optional[ET.Element]:
+    if not KIPRIS_API_KEY:
+        return None
+    final_params = {k: v for k, v in params if v not in [None, ""]}
+    final_params["ServiceKey"] = KIPRIS_API_KEY
+    url = f"{KIPRIS_BASE_URL}/{operation}"
     try:
-        res = safe_gemini_call(
-            prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.1,
-            ),
-        )
-        return extract_json_object(getattr(res, "text", ""))
+        r = SESSION.get(url, params=final_params, timeout=REQUEST_TIMEOUT)
+        if r.status_code != 200:
+            return None
+        return ET.fromstring(r.text)
     except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def search_kipris_patents(korean_keywords: Tuple[str, ...]) -> List[Dict]:
+    if not KIPRIS_API_KEY:
+        return []
+
+    queries = []
+    words = [x for x in korean_keywords if x]
+    if words:
+        queries.append(" ".join(words[:3]))
+        queries.append(" ".join(words[:2]))
+        for kw in words[:5]:
+            queries.append(kw)
+
+    collected = []
+    seen = set()
+    applicant_queries = [PNU_IUCF_APPLICANT_KR, "부산대학교"]
+
+    for q in queries[:7]:
+        for applicant in applicant_queries:
+            root = kipris_call(
+                "getAdvancedSearch",
+                tuple(sorted({
+                    "word": q,
+                    "applicant": applicant,
+                    "patent": "true",
+                    "utility": "false",
+                    "lastvalue": "R",
+                    "sortSpec": "AD",
+                    "descSort": "true",
+                    "pageNo": "1",
+                    "numOfRows": "40",
+                }.items()))
+            )
+            if root is None:
+                continue
+            items = [elem for elem in root.iter() if elem.tag.split('}')[-1] == 'items']
+            if not items:
+                continue
+            for item in items[0]:
+                app_no = first_text_by_tags(item, ["applicationNumber", "ApplicationNumber"])
+                title = first_text_by_tags(item, ["inventionTitle", "InventionTitle"])
+                abstract = first_text_by_tags(item, ["astrtCont", "astrtContent", "AstrtCont"])
+                applicant_name = first_text_by_tags(item, ["applicantName", "ApplicantName"])
+                application_date = first_text_by_tags(item, ["applicationDate", "ApplicationDate"])
+                register_number = first_text_by_tags(item, ["registerNumber", "RegisterNumber"])
+                register_date = first_text_by_tags(item, ["registerDate", "RegisterDate"])
+                register_status = first_text_by_tags(item, ["registerStatus", "RegisterStatus"])
+                key = app_no or f"{title}|{application_date}"
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                collected.append({
+                    "application_number": app_no,
+                    "title": title or "발명의 명칭 미상",
+                    "abstract": abstract,
+                    "application_date": application_date,
+                    "register_number": register_number,
+                    "register_date": register_date,
+                    "register_status": register_status,
+                    "applicant_name_summary": applicant_name,
+                    "search_query": q,
+                })
+                if len(collected) >= 60:
+                    return collected
+    return collected
+
+
+@st.cache_data(show_spinner=False)
+def get_kipris_bibliography_detail(application_number: str) -> Optional[Dict]:
+    if not application_number:
+        return None
+    root = kipris_call(
+        "getBibliographyDetailInfoSearch",
+        tuple(sorted({"applicationNumber": application_number}.items()))
+    )
+    if root is None:
+        return None
+
+    applicant_names = unique_keep_order(extract_texts_by_tag(root, "name"))
+    applicant_eng_names = unique_keep_order(extract_texts_by_tag(root, "engName"))
+    inventor_names = unique_keep_order(extract_texts_by_tag(root, "name"))
+
+    # name 태그가 applicant / inventor 양쪽에서 반복되므로 배열 단위로 다시 한 번 분리 추출
+    def extract_nested_names(array_tag: str) -> List[str]:
+        vals = []
+        for elem in root.iter():
+            if elem.tag.split('}')[-1] == array_tag:
+                for sub in elem.iter():
+                    if sub.tag.split('}')[-1] == 'name':
+                        val = normalize_space(sub.text or '')
+                        if val:
+                            vals.append(val)
+        return unique_keep_order(vals)
+
+    applicant_names = extract_nested_names("applicantInfoArray") or applicant_names[:5]
+    inventor_names = extract_nested_names("inventorInfoArray") or inventor_names[:10]
+
+    detail = {
+        "application_number": first_text_by_tags(root, ["applicationNumber"]),
+        "application_date": first_text_by_tags(root, ["applicationDate"]),
+        "title": first_text_by_tags(root, ["inventionTitle"]),
+        "title_eng": first_text_by_tags(root, ["inventionTitleEng"]),
+        "abstract": first_text_by_tags(root, ["astrtCont"]),
+        "register_number": first_text_by_tags(root, ["registerNumber"]),
+        "register_date": first_text_by_tags(root, ["registerDate"]),
+        "register_status": first_text_by_tags(root, ["registerStatus"]),
+        "applicant_names": applicant_names,
+        "applicant_eng_names": applicant_eng_names,
+        "inventor_names": inventor_names,
+        "ipc_numbers": unique_keep_order(extract_texts_by_tag(root, "ipcNumber"))[:8],
+    }
+    return detail
+
+
+def is_single_pnu_iucf_applicant(detail: Dict) -> bool:
+    applicants = [normalize_space(x) for x in detail.get("applicant_names", []) if normalize_space(x)]
+    if len(applicants) != 1:
+        return False
+    only = applicants[0]
+    if only == PNU_IUCF_APPLICANT_KR:
+        return True
+    low = only.lower()
+    return ("pusan national university" in low or "busan national university" in low) and any(h in low for h in PNU_IUCF_APPLICANT_EN_HINTS)
+
+
+@st.cache_data(show_spinner=False)
+def enrich_and_filter_pnu_iucf_patents(raw_patents: List[Dict]) -> Tuple[List[Dict], List[str]]:
+    valid = []
+    inventors = []
+    seen_people = set()
+    for item in raw_patents:
+        app_no = item.get("application_number", "")
+        if not app_no:
+            continue
+        detail = get_kipris_bibliography_detail(app_no)
+        if not detail:
+            continue
+        if not is_single_pnu_iucf_applicant(detail):
+            continue
+        merged = {**item, **detail}
+        valid.append(merged)
+        for name in detail.get("inventor_names", []):
+            if name not in seen_people:
+                seen_people.add(name)
+                inventors.append(name)
+        if len(valid) >= MAX_PATENTS:
+            break
+    return valid, inventors[:MAX_AUTHORS]
+
+
+def score_patent_relevance(valid_patents: List[Dict], profile: Dict, tech_summary: str) -> Dict[str, Dict]:
+    if not valid_patents:
         return {}
-
-
-# -----------------------------
-# Step 4-2. Fallback professor search
-# -----------------------------
-def fallback_field_match_professors(search_profile: Dict, tech_summary: str) -> List[Dict]:
-    """
-    논문 기반 매칭 교수가 0명일 경우
-    부산대 교수 공개 연구분야 기준 후보 탐색
-    """
+    blocks = []
+    for i, p in enumerate(valid_patents, start=1):
+        blocks.append(
+            f"[{i}] Title: {p.get('title', '')}\n"
+            f"Abstract: {compact_text(p.get('abstract', ''), 1200)}\n"
+            f"IPC: {', '.join(p.get('ipc_numbers', []))}\n"
+        )
     prompt = f"""
-당신은 부산대학교 교수 연구분야 매칭 시스템입니다.
-
-논문 기반 직접 매칭 교수 후보가 없을 때,
-부산대학교 현직 전임교원 중 공개된 학과/연구실 정보 기준으로
-수요기술과 연관성 높은 교수 후보 3~5명을 추천하세요.
+당신은 대학 산학협력용 특허 적합성 평가기입니다.
+아래 수요기술과 특허 목록을 비교해 각 특허의 적합도를 JSON으로 반환하세요.
 
 수요기술 요약:
 {tech_summary}
 
-기술 프로파일:
-- core_tech: {search_profile.get("core_tech", [])}
-- materials_or_methods: {search_profile.get("materials_or_methods", [])}
-- properties: {search_profile.get("properties", [])}
-- applications: {search_profile.get("applications", [])}
+프로파일:
+- core_tech: {profile.get('core_tech', [])}
+- materials_or_methods: {profile.get('materials_or_methods', [])}
+- properties: {profile.get('properties', [])}
+- applications: {profile.get('applications', [])}
+- korean_patent_keywords: {profile.get('korean_patent_keywords', [])}
 
-출력 규칙:
-1. 반드시 부산대학교 현재 교수만
-2. 실제 있을 가능성이 높은 학과/전공 기준
-3. 논문 근거가 아니라 연구분야 기준 후보
-4. score는 0~100 정수
-5. 출력은 JSON만
+등급:
+- High: 직접 관련
+- Medium: 인접 관련
+- Low: 부분적 관련
+- Exclude: 비관련
 
-형식:
+출력 형식:
 {{
-  "results": [
-    {{
-      "name": "홍길동",
-      "department": "화학공학과",
-      "field": "고분자 소재, 접착제, 기능성 수지",
-      "score": 92,
-      "reason": "접착소재 및 고분자 수지 연구분야 보유",
-      "link": "https://..."
-    }}
-  ]
+  "1": {{"relevance": "High/Medium/Low/Exclude", "score": 0-100, "reason": "한 줄 근거"}}
 }}
+
+특허 목록:
+{chr(10).join(blocks)}
 """
+    data = safe_gemini_json(prompt)
+    if isinstance(data, dict) and data:
+        return data
+    fallback = {}
+    for i, _ in enumerate(valid_patents, start=1):
+        fallback[str(i)] = {"relevance": "Medium", "score": 60, "reason": "적합성 평가 실패로 기본값 적용"}
+    return fallback
 
-    try:
-        res = safe_gemini_call(
-            prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.2,
-            ),
+
+def select_relevant_patents(valid_patents: List[Dict], relevance_map: Dict[str, Dict]) -> List[Dict]:
+    selected, medium, low = [], [], []
+    for i, p in enumerate(valid_patents, start=1):
+        rel = relevance_map.get(str(i), {}) if isinstance(relevance_map, dict) else {}
+        label = str(rel.get("relevance", "Medium")).strip()
+        score = clamp_score(rel.get("score", 60), 60)
+        reason = str(rel.get("reason", "")).strip()
+        p["patent_relevance"] = label
+        p["patent_score"] = score
+        p["patent_reason"] = reason
+        if label == "High":
+            selected.append(p)
+        elif label == "Medium":
+            medium.append(p)
+        elif label == "Low":
+            low.append(p)
+    selected.extend(sorted(medium, key=lambda x: x.get("patent_score", 0), reverse=True))
+    if len(selected) < MIN_RELEVANT_PATENTS:
+        selected.extend(sorted(low, key=lambda x: x.get("patent_score", 0), reverse=True)[:MIN_RELEVANT_PATENTS - len(selected)])
+    return selected[:MAX_PATENTS]
+
+
+def summarize_patents(valid_patents: List[Dict]) -> Dict[str, Dict[str, str]]:
+    if not valid_patents:
+        return {}
+    blocks = []
+    for i, p in enumerate(valid_patents, start=1):
+        blocks.append(
+            f"[{i}] Title: {p.get('title', '')}\n"
+            f"Abstract: {compact_text(p.get('abstract', ''), 1000)}\n"
         )
-        data = extract_json_object(getattr(res, "text", ""))
-        results = data.get("results", []) if isinstance(data, dict) else []
+    prompt = f"""
+아래 특허들에 대해 각 번호별로
+1) 한국어 정리 제목
+2) 기술 핵심 요약 한 줄
+을 작성하세요.
 
-        cleaned = []
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            cleaned.append(
-                {
-                    "name": str(item.get("name", "미확인")).strip() or "미확인",
-                    "department": str(item.get("department", "미확인")).strip() or "미확인",
-                    "field": str(item.get("field", "미확인")).strip() or "미확인",
-                    "score": clamp_score(item.get("score", 70), default=70),
-                    "reason": str(item.get("reason", "")).strip(),
-                    "link": str(item.get("link", "")).strip(),
+출력 형식:
+[번호] 제목 | 요약내용
+
+{chr(10).join(blocks)}
+"""
+    if client is None:
+        return {}
+    try:
+        res = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        parsed = {}
+        for line in getattr(res, "text", "").split("\n"):
+            if "|" in line and line.strip().startswith("[") and "]" in line:
+                parts = line.split("]", 1)
+                idx = parts[0].replace("[", "").strip()
+                title_part, sum_part = parts[1].split("|", 1)
+                parsed[idx] = {
+                    "title": title_part.strip(),
+                    "sum": sum_part.strip(),
                 }
-            )
-        return cleaned
+        return parsed
     except Exception:
-        return []
+        return {}
 
 
 # -----------------------------
-# Step 5. Paper summary
+# Evidence-only professor verification
+# -----------------------------
+def is_official_domain(url: str) -> bool:
+    try:
+        netloc = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    return any(netloc.endswith(domain) for domain in OFFICIAL_DOMAINS)
+
+
+@st.cache_data(show_spinner=False)
+def duckduckgo_search(query: str, max_results: int = 8) -> List[Dict[str, str]]:
+    url = "https://html.duckduckgo.com/html/"
+    results = []
+    try:
+        r = SESSION.post(url, data={"q": query}, timeout=REQUEST_TIMEOUT)
+        if r.status_code != 200:
+            return []
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.select("a.result__a")[:max_results]:
+            href = a.get("href", "").strip()
+            title = normalize_space(a.get_text(" ", strip=True))
+            if href and title:
+                results.append({"title": title, "url": href})
+    except Exception:
+        return []
+    return results
+
+
+@st.cache_data(show_spinner=False)
+def fetch_page_text(url: str) -> str:
+    try:
+        r = SESSION.get(url, timeout=REQUEST_TIMEOUT)
+        if r.status_code != 200:
+            return ""
+        soup = BeautifulSoup(r.text, "html.parser")
+        return normalize_space(soup.get_text(" ", strip=True))[:15000]
+    except Exception:
+        return ""
+
+
+@st.cache_data(show_spinner=False)
+def verify_professor_from_official_pages(author_name: str) -> Optional[Dict]:
+    name = normalize_space(author_name)
+    if not name:
+        return None
+
+    queries = [
+        f'site:pusan.ac.kr "{name}" "Pusan National University"',
+        f'site:pusan.ac.kr "{name}" professor',
+        f'site:pusan.ac.kr "{name}" faculty',
+        f'site:pusan.ac.kr "{name}" department',
+    ]
+
+    professor_keywords = [
+        "professor", "faculty", "assistant professor", "associate professor", "full professor",
+        "교수", "조교수", "부교수", "정교수", "교원", "faculty member", "faculty profile"
+    ]
+    department_keywords = [
+        "department", "school", "college", "학과", "학부", "대학", "대학원", "전공", "lab", "laboratory", "연구실"
+    ]
+
+    for query in queries:
+        results = duckduckgo_search(query, max_results=8)
+        for item in results:
+            url = item.get("url", "")
+            if not is_official_domain(url):
+                continue
+            page_text = fetch_page_text(url)
+            if not page_text:
+                continue
+            low_text = page_text.lower()
+            low_name = name.lower()
+            if low_name not in low_text:
+                continue
+            has_professor_word = any(k in low_text for k in professor_keywords)
+            has_department_word = any(k in low_text for k in department_keywords)
+            if not (has_professor_word and has_department_word):
+                continue
+
+            dept = extract_department_from_page(page_text)
+            field = extract_field_from_page(page_text)
+            evidence = extract_evidence_snippet(page_text, name)
+            return {
+                "official_name": name,
+                "department": dept or "확인됨(세부 학과 추출 실패)",
+                "field": field or "공식 페이지에서 상세 연구분야 자동 추출 실패",
+                "link": url,
+                "evidence": evidence or "공식 페이지에서 이름과 교수/학과 표현을 확인함",
+            }
+    return None
+
+
+def extract_department_from_page(text: str) -> str:
+    patterns = [
+        r"(Department of [A-Za-z0-9\-&, ]{3,80})",
+        r"(School of [A-Za-z0-9\-&, ]{3,80})",
+        r"([가-힣A-Za-z0-9·\- ]{2,40}학과)",
+        r"([가-힣A-Za-z0-9·\- ]{2,40}학부)",
+        r"([가-힣A-Za-z0-9·\- ]{2,40}대학)",
+        r"([가-힣A-Za-z0-9·\- ]{2,40}전공)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return normalize_space(m.group(1))[:120]
+    return ""
+
+
+def extract_field_from_page(text: str) -> str:
+    patterns = [
+        r"(Research Interests?[:\s][A-Za-z0-9,;\-()/. ]{10,200})",
+        r"(Research Areas?[:\s][A-Za-z0-9,;\-()/. ]{10,200})",
+        r"(연구분야[:\s][가-힣A-Za-z0-9,;·\-()/. ]{5,200})",
+        r"(주요 연구분야[:\s][가-힣A-Za-z0-9,;·\-()/. ]{5,200})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return normalize_space(m.group(1))[:200]
+    return ""
+
+
+def extract_evidence_snippet(text: str, author_name: str) -> str:
+    idx = text.lower().find(author_name.lower())
+    if idx == -1:
+        return ""
+    start = max(0, idx - 120)
+    end = min(len(text), idx + 220)
+    return normalize_space(text[start:end])
+
+
+# -----------------------------
+# Paper/Patent summary
 # -----------------------------
 def summarize_papers(valid_papers: List[Dict]) -> Dict[str, Dict[str, str]]:
     if not valid_papers:
         return {}
-
-    abstracts_to_sum = ""
+    blocks = []
     for i, p in enumerate(valid_papers, start=1):
         abs_text = reconstruct_abstract(p.get("abstract_inverted_index"))
-        abstracts_to_sum += f"[{i}] Title: {p.get('title')}\nAbstract: {abs_text[:700]}\n\n"
+        blocks.append(f"[{i}] Title: {p.get('title')}\nAbstract: {abs_text[:700]}\n")
 
     prompt = f"""
 아래 논문들에 대해 각 번호별로
@@ -648,39 +886,44 @@ def summarize_papers(valid_papers: List[Dict]) -> Dict[str, Dict[str, str]]:
 2) 기술 핵심 요약 한 줄
 을 작성하세요.
 
-출력 형식은 각 줄마다 정확히 다음처럼 작성:
+출력 형식:
 [번호] 번역제목 | 요약내용
 
-{abstracts_to_sum}
+{chr(10).join(blocks)}
 """
-
+    if client is None:
+        return {}
     try:
-        res = safe_gemini_call(prompt)
+        res = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
         parsed = {}
         for line in getattr(res, "text", "").split("\n"):
             if "|" in line and line.strip().startswith("[") and "]" in line:
                 parts = line.split("]", 1)
                 idx = parts[0].replace("[", "").strip()
-                detail_parts = parts[1].split("|", 1)
-                if len(detail_parts) == 2:
-                    parsed[idx] = {
-                        "title": detail_parts[0].strip(),
-                        "sum": detail_parts[1].strip(),
-                    }
+                title_part, sum_part = parts[1].split("|", 1)
+                parsed[idx] = {
+                    "title": title_part.strip(),
+                    "sum": sum_part.strip(),
+                }
         return parsed
     except Exception:
         return {}
 
 
 # -----------------------------
-# Step 6. Assemble result
+# Result assembly
 # -----------------------------
-def build_professor_map(valid_papers: List[Dict], author_db: Dict, parsed_results: Dict) -> Dict:
-    professor_map = {}
+def build_verified_researcher_map(
+    valid_papers: List[Dict],
+    valid_patents: List[Dict],
+    verified_authors: Dict[str, Dict],
+    parsed_papers: Dict,
+    parsed_patents: Dict,
+) -> Dict:
+    researcher_map = {}
 
     for i, p in enumerate(valid_papers, start=1):
-        idx = str(i)
-        info = parsed_results.get(idx, {})
+        info = parsed_papers.get(str(i), {})
         paper_obj = {
             "title": p.get("title", "제목 미상"),
             "k_title": info.get("title", p.get("title", "제목 미상")),
@@ -691,283 +934,269 @@ def build_professor_map(valid_papers: List[Dict], author_db: Dict, parsed_result
             "paper_score": p.get("paper_score", 0),
             "paper_reason": p.get("paper_reason", ""),
         }
-
         for name, is_pnu in p.get("raw_authors_info", []):
-            if not is_pnu:
+            if not is_pnu or name not in verified_authors:
                 continue
-
-            db = author_db.get(name, {}) if isinstance(author_db, dict) else {}
-            active = normalize_yes_no(str(db.get("is_active") or "Unknown"))
-            relevance = str(db.get("relevance") or "Unknown").strip()
-
-            if active == "No":
-                continue
-            if active != "Yes":
-                continue
-            if relevance == "Low":
-                continue
-
-            if name not in professor_map:
-                professor_map[name] = {
-                    "k_name": db.get("korean_name", "확인안됨"),
-                    "dept": db.get("department", "확인안됨"),
-                    "field": db.get("field", "확인안됨"),
+            db = verified_authors[name]
+            if name not in researcher_map:
+                researcher_map[name] = {
+                    "dept": db.get("department", "공식 확인됨"),
+                    "field": db.get("field", "공식 페이지 기반 확인"),
                     "link": db.get("link", "#"),
-                    "relevance": relevance,
-                    "note": db.get("note", ""),
+                    "evidence": db.get("evidence", "공식 페이지 확인"),
                     "papers": [],
+                    "patents": [],
                 }
+            researcher_map[name]["papers"].append(paper_obj)
 
-            if paper_obj not in professor_map[name]["papers"]:
-                professor_map[name]["papers"].append(paper_obj)
+    for i, p in enumerate(valid_patents, start=1):
+        info = parsed_patents.get(str(i), {})
+        patent_obj = {
+            "title": p.get("title", "발명의 명칭 미상"),
+            "k_title": info.get("title", p.get("title", "발명의 명칭 미상")),
+            "summary": info.get("sum", "요약 없음"),
+            "application_number": p.get("application_number", "출원번호 미상"),
+            "application_date": p.get("application_date", "출원일자 미상"),
+            "register_number": p.get("register_number", ""),
+            "register_date": p.get("register_date", ""),
+            "register_status": p.get("register_status", ""),
+            "patent_relevance": p.get("patent_relevance", "Unknown"),
+            "patent_score": p.get("patent_score", 0),
+            "patent_reason": p.get("patent_reason", ""),
+            "applicant_names": p.get("applicant_names", []),
+        }
+        for name in p.get("inventor_names", []):
+            if name not in verified_authors:
+                continue
+            db = verified_authors[name]
+            if name not in researcher_map:
+                researcher_map[name] = {
+                    "dept": db.get("department", "공식 확인됨"),
+                    "field": db.get("field", "공식 페이지 기반 확인"),
+                    "link": db.get("link", "#"),
+                    "evidence": db.get("evidence", "공식 페이지 확인"),
+                    "papers": [],
+                    "patents": [],
+                }
+            researcher_map[name]["patents"].append(patent_obj)
 
-    for _, data in professor_map.items():
-        data["papers"] = sorted(
-            data["papers"],
-            key=lambda x: (
-                label_rank(x.get("paper_relevance", "Unknown")),
-                -int(x.get("paper_score", 0)),
-            ),
-        )
+    for _, data in researcher_map.items():
+        unique_papers, seen_papers = [], set()
+        for p in sorted(data["papers"], key=lambda x: (-int(x.get("paper_score", 0)), x.get("title", ""))):
+            key = (p.get("title"), p.get("date"))
+            if key in seen_papers:
+                continue
+            seen_papers.add(key)
+            unique_papers.append(p)
+        data["papers"] = unique_papers
 
-    return professor_map
+        unique_patents, seen_patents = [], set()
+        for p in sorted(data["patents"], key=lambda x: (-int(x.get("patent_score", 0)), x.get("application_number", ""), x.get("title", ""))):
+            key = (p.get("application_number"), p.get("title"))
+            if key in seen_patents:
+                continue
+            seen_patents.add(key)
+            unique_patents.append(p)
+        data["patents"] = unique_patents
+    return researcher_map
 
 
+# -----------------------------
+# Main analysis
+# -----------------------------
 def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> str:
     def report(step: int, total: int, label: str, detail: str = ""):
         if progress_callback:
             progress_callback(step, total, label, detail)
 
-    total_steps = 8
+    total_steps = 11 if kipris_enabled() else 8
     report(0, total_steps, "입력 확인", "파일 또는 직접 입력 내용을 점검하는 중입니다.")
-
-    file_text = extract_text_from_uploaded_file(uploaded_file) if uploaded_file else ""
-    query_text = file_text.strip() if file_text.strip() else (manual_text or "").strip()
-
+    query_text = (file_text(uploaded_file) if uploaded_file else "").strip() or (manual_text or "").strip()
     if len(query_text) < 5:
         return "분석할 내용이 없습니다. 파일을 업로드하거나 내용을 입력해주세요."
 
     report(1, total_steps, "기본 정보 추출", "기업명과 수요기술 요약을 정리하는 중입니다.")
     request_meta = extract_request_metadata(query_text)
 
-    report(2, total_steps, "기술 프로파일 생성", "검색용 키워드와 기술 구조를 도출하는 중입니다.")
-    search_profile = extract_search_profile(query_text)
-    if (not request_meta.get("tech_summary")) and search_profile.get("korean_summary"):
-        request_meta["tech_summary"] = search_profile.get("korean_summary")
-
-    keywords_text = format_keyword_text(search_profile)
+    report(2, total_steps, "기술 프로파일 생성", "논문/특허 검색용 키워드를 만드는 중입니다.")
+    profile = extract_search_profile(query_text)
+    if (not request_meta.get("tech_summary")) and profile.get("korean_summary"):
+        request_meta["tech_summary"] = profile.get("korean_summary")
+    keywords_text = format_keyword_text(profile)
+    patent_keywords_text = format_patent_keyword_text(profile)
 
     report(3, total_steps, "논문 검색", "OpenAlex에서 부산대 관련 논문을 수집하는 중입니다.")
     raw_papers = search_openalex(
-        tuple(search_profile.get("search_keywords", [])),
-        tuple(search_profile.get("applications", [])),
-        tuple(search_profile.get("core_tech", [])),
+        tuple(profile.get("search_keywords", [])),
+        tuple(profile.get("applications", [])),
+        tuple(profile.get("core_tech", [])),
     )
 
-    report(4, total_steps, "부산대 논문 필터링", f"수집 논문 {len(raw_papers)}건에서 부산대 소속 저자를 확인하는 중입니다.")
+    report(4, total_steps, "부산대 논문 필터링", f"수집 논문 {len(raw_papers)}건에서 부산대 저자를 식별하는 중입니다.")
     pnu_papers, _ = filter_pnu_papers(raw_papers)
 
-    if not pnu_papers:
-        report(total_steps, total_steps, "분석 완료", "부산대 소속 논문을 찾지 못했습니다.")
-        company_name = request_meta.get("company_name", "미확인")
-        tech_summary = request_meta.get("tech_summary", "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다.")
-
-        fallback_candidates = fallback_field_match_professors(search_profile, tech_summary)
-
-        final_output = []
-        final_output.append(f"### 🏢 기업명: **{company_name}**")
-        final_output.append("")
-        final_output.append("### 📝 수요기술 요약")
-        final_output.append(tech_summary)
-        final_output.append("")
-        final_output.append(f"### 🔍 분석 키워드: **{keywords_text}**")
-        final_output.append("")
-        final_output.append("- OpenAlex에서 부산대 소속 논문을 찾지 못했습니다.")
-        final_output.append("- 대신 부산대학교 교수진의 공개 연구분야를 기준으로 후보를 탐색했습니다.")
-        final_output.append("")
-        final_output.append("---")
-
-        if fallback_candidates:
-            final_output.append("## 🔎 연구분야 매칭 후보")
-            final_output.append("")
-            for prof in sorted(fallback_candidates, key=lambda x: x.get("score", 0), reverse=True):
-                final_output.append(f"### 🏫 {prof.get('department', '미확인')} | {prof.get('name', '미확인')} 교수")
-                final_output.append(f"- **연구분야:** {prof.get('field', '미확인')}")
-                final_output.append(f"- **연구분야 연관성:** {prof.get('score', 0)}점")
-                if prof.get("reason"):
-                    final_output.append(f"- **추천 사유:** {prof.get('reason')}")
-                if prof.get("link"):
-                    final_output.append(f"- **홈페이지:** [링크 바로가기]({prof.get('link')})")
-                final_output.append("")
-
-        return "\n".join(final_output)
-
-    report(5, total_steps, "논문 적합성 검증", f"부산대 논문 {len(pnu_papers)}건이 수요기술과 실제로 맞는지 평가하는 중입니다.")
-    relevance_map = score_paper_relevance(
-        pnu_papers,
-        search_profile,
-        request_meta.get("tech_summary", ""),
-    )
+    report(5, total_steps, "논문 적합성 검토", f"부산대 논문 {len(pnu_papers)}건의 적합도를 평가하는 중입니다.")
+    relevance_map = score_paper_relevance(pnu_papers, profile, request_meta.get("tech_summary", ""))
     valid_papers = select_relevant_papers(pnu_papers, relevance_map)
-
     if not valid_papers:
         valid_papers = pnu_papers[:MIN_RELEVANT_PAPERS]
-        for p in valid_papers:
-            p["paper_relevance"] = p.get("paper_relevance", "Low")
-            p["paper_score"] = clamp_score(p.get("paper_score", 50), default=50)
-            p["paper_reason"] = p.get("paper_reason", "적합 논문 최소 확보를 위한 보조 포함")
 
-    filtered_authors = []
-    seen_filtered_authors = set()
+    filtered_paper_authors = []
+    seen = set()
     for p in valid_papers:
         for name, is_pnu in p.get("raw_authors_info", []):
-            if is_pnu and name not in seen_filtered_authors:
-                seen_filtered_authors.add(name)
-                filtered_authors.append(name)
+            if is_pnu and name not in seen:
+                seen.add(name)
+                filtered_paper_authors.append(name)
 
-    report(6, total_steps, "교수 정보 확인", f"교수 후보 {len(filtered_authors[:MAX_AUTHORS_FOR_ENRICH])}명의 현직 여부와 전공 정보를 확인하는 중입니다.")
-    paper_titles = [p.get("title", "") for p in valid_papers]
-    author_db = enrich_authors_with_gemini(
-        filtered_authors[:MAX_AUTHORS_FOR_ENRICH],
-        search_profile,
-        paper_titles,
-    )
+    valid_patents = []
+    patent_inventors = []
+    patent_relevance_map = {}
+    if kipris_enabled():
+        report(6, total_steps, "특허 검색", "KIPRIS에서 수요기술 연관 특허를 검색하는 중입니다.")
+        raw_patents = search_kipris_patents(tuple(profile.get("korean_patent_keywords", [])))
 
-    report(7, total_steps, "논문 요약 및 결과 정리", f"적합 논문 {len(valid_papers)}건을 요약하고 최종 결과를 구성하는 중입니다.")
-    parsed_results = summarize_papers(valid_papers)
-    professor_map = build_professor_map(valid_papers, author_db, parsed_results)
+        report(7, total_steps, "산학협력단 단독출원 특허 필터링", f"수집 특허 {len(raw_patents)}건에서 부산대학교 산학협력단 단독출원 여부를 확인하는 중입니다.")
+        pnu_iucf_patents, patent_inventors = enrich_and_filter_pnu_iucf_patents(raw_patents)
 
-    fallback_candidates = []
-    if not professor_map:
-        fallback_candidates = fallback_field_match_professors(
-            search_profile,
-            request_meta.get("tech_summary", "")
-        )
+        report(8, total_steps, "특허 적합성 검토", f"단독출원 특허 {len(pnu_iucf_patents)}건의 적합도를 평가하는 중입니다.")
+        patent_relevance_map = score_patent_relevance(pnu_iucf_patents, profile, request_meta.get("tech_summary", ""))
+        valid_patents = select_relevant_patents(pnu_iucf_patents, patent_relevance_map)
+        if not valid_patents:
+            valid_patents = pnu_iucf_patents[:MIN_RELEVANT_PATENTS]
+
+        verify_step = 9
+        summarize_step = 10
+    else:
+        verify_step = 6
+        summarize_step = 7
+
+    all_people = unique_keep_order(filtered_paper_authors + patent_inventors)[:MAX_AUTHORS]
+    report(verify_step, total_steps, "공식 교수 페이지 검증", f"논문 저자/특허 발명자 {len(all_people)}명의 공식 페이지를 확인하는 중입니다.")
+    verified_authors = {}
+    unverified_authors = []
+    for name in all_people:
+        verified = verify_professor_from_official_pages(name)
+        if verified:
+            verified_authors[name] = verified
+        else:
+            unverified_authors.append(name)
+
+    report(summarize_step, total_steps, "요약 및 결과 정리", f"공식 검증 통과 인원 {len(verified_authors)}명을 정리하는 중입니다.")
+    parsed_papers = summarize_papers(valid_papers)
+    parsed_patents = summarize_patents(valid_patents) if kipris_enabled() else {}
+    researcher_map = build_verified_researcher_map(valid_papers, valid_patents, verified_authors, parsed_papers, parsed_patents)
 
     high_count = sum(1 for p in valid_papers if p.get("paper_relevance") == "High")
     medium_count = sum(1 for p in valid_papers if p.get("paper_relevance") == "Medium")
+    patent_high_count = sum(1 for p in valid_patents if p.get("patent_relevance") == "High")
+    patent_medium_count = sum(1 for p in valid_patents if p.get("patent_relevance") == "Medium")
 
-    final_output = []
-    final_output.append(f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**")
-    final_output.append("")
-    final_output.append("### 📝 수요기술 요약")
-    final_output.append(
-        request_meta.get(
-            "tech_summary",
-            "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다."
-        )
-    )
-    final_output.append("")
-    final_output.append(f"### 🔍 분석 키워드: **{keywords_text}**")
-    final_output.append("")
-    final_output.append(f"- 검토 논문 수: **{len(pnu_papers)}건**")
-    final_output.append(f"- 적합성 통과 논문 수: **{len(valid_papers)}건** (High {high_count}건 / Medium {medium_count}건)")
-    final_output.append(f"- 검토 부산대 저자 수: **{len(filtered_authors)}명**")
-    final_output.append(f"- 최종 매칭 교수 수: **{len(professor_map)}명**")
-    final_output.append("")
-    final_output.append("---")
+    lines = []
+    lines.append(f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**")
+    lines.append("")
+    lines.append("### 📝 수요기술 요약")
+    lines.append(request_meta.get("tech_summary", "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다."))
+    lines.append("")
+    lines.append(f"### 🔍 논문 분석 키워드: **{keywords_text}**")
+    if kipris_enabled():
+        lines.append(f"### 🔎 특허 분석 키워드: **{patent_keywords_text}**")
+    lines.append("")
+    lines.append(f"- 검토 논문 수: **{len(pnu_papers)}건**")
+    lines.append(f"- 적합성 통과 논문 수: **{len(valid_papers)}건** (High {high_count}건 / Medium {medium_count}건)")
+    if kipris_enabled():
+        lines.append(f"- 적합성 통과 특허 수: **{len(valid_patents)}건** (High {patent_high_count}건 / Medium {patent_medium_count}건)")
+        lines.append(f"- 특허 필터 기준: **부산대학교 산학협력단 단독출원**")
+    lines.append(f"- 검토 연구자 수(논문 저자+특허 발명자): **{len(all_people)}명**")
+    lines.append(f"- 공식 페이지 검증 통과 교수 수: **{len(researcher_map)}명**")
+    if unverified_authors:
+        lines.append(f"- 공식 페이지 미검증 인원 수: **{len(unverified_authors)}명**")
+    if not kipris_enabled():
+        lines.append("- KIPRIS_API_KEY가 없어 특허 검색은 건너뜀")
+    lines.append("")
+    lines.append("---")
 
-    if not professor_map:
-        final_output.append("논문 기반 직접 매칭 교수는 없었습니다.")
-        final_output.append("대신 부산대학교 교수진의 공개 연구분야를 기준으로 후보를 제안합니다.")
-        final_output.append("")
-        final_output.append("---")
+    if not researcher_map:
+        lines.append("## ⚠️ 증거형 추천 결과")
+        lines.append("")
+        lines.append("- 논문 저자 또는 특허 발명자는 확인되었지만, 공식 부산대 교수 페이지까지 확인된 후보가 없어 교수명을 출력하지 않았습니다.")
+        lines.append("- 증거형 추천 원칙상 공식 페이지 확인 없는 이름은 제외했습니다.")
+        if unverified_authors:
+            lines.append(f"- 미검증 인원: {', '.join(unverified_authors[:15])}")
+        return "\n".join(lines)
 
-        if fallback_candidates:
-            final_output.append("## 🔎 연구분야 매칭 후보")
-            final_output.append("")
-
-            fallback_candidates = sorted(
-                fallback_candidates,
-                key=lambda x: x.get("score", 0),
-                reverse=True
-            )
-
-            for prof in fallback_candidates:
-                final_output.append(f"### 🏫 {prof.get('department', '미확인')} | {prof.get('name', '미확인')} 교수")
-                final_output.append(f"- **연구분야:** {prof.get('field', '미확인')}")
-                final_output.append(f"- **연구분야 연관성:** {prof.get('score', 0)}점")
-                if prof.get("reason"):
-                    final_output.append(f"- **추천 사유:** {prof.get('reason', '')}")
-                if prof.get("link"):
-                    final_output.append(f"- **홈페이지:** [링크 바로가기]({prof.get('link')})")
-                final_output.append("")
-
-            report(
-                total_steps,
-                total_steps,
-                "분석 완료",
-                f"연구분야 기반 후보 {len(fallback_candidates)}명을 제안했습니다."
-            )
-            return "\n".join(final_output)
-
-        final_output.append("연구분야 기반 후보도 찾지 못했습니다.")
-        report(
-            total_steps,
-            total_steps,
-            "분석 완료",
-            "최종 후보를 찾지 못했습니다."
-        )
-        return "\n".join(final_output)
-
-    sorted_professors = sorted(
-        professor_map.items(),
+    sorted_researchers = sorted(
+        researcher_map.items(),
         key=lambda x: (
-            label_rank(x[1].get("relevance", "Unknown")),
-            -sum(int(p.get("paper_score", 0)) for p in x[1].get("papers", [])),
-            -len(x[1].get("papers", [])),
-        ),
+            -(sum(int(p.get("paper_score", 0)) for p in x[1].get("papers", [])) + sum(int(p.get("patent_score", 0)) for p in x[1].get("patents", []))),
+            -(len(x[1].get("papers", [])) + len(x[1].get("patents", []))),
+            x[0],
+        )
     )
 
-    for eng_name, data in sorted_professors:
-        final_output.append(f"## 🏫 {data['dept']} | {data['k_name']} 교수 ({eng_name})")
-        final_output.append(f"- **주요 연구분야:** {data['field']}")
-        final_output.append(f"- **기술 연관성:** {data.get('relevance', 'Unknown')}")
-        if data.get("note"):
-            final_output.append(f"- **판단 메모:** {data['note']}")
-        final_output.append(f"- **학과/연구실 홈페이지:** [링크 바로가기]({data['link']})")
-        final_output.append("")
-        final_output.append("#### 📄 관련 연구 논문 내역")
+    for name, data in sorted_researchers:
+        lines.append(f"## 🏫 {data['dept']} | {name}")
+        lines.append(f"- **검증 방식:** 공식 부산대 페이지 검색 확인")
+        lines.append(f"- **공식 페이지 근거:** {data['evidence']}")
+        lines.append(f"- **주요 연구분야(페이지 추출):** {data['field']}")
+        lines.append(f"- **공식 링크:** [링크 바로가기]({data['link']})")
+        lines.append("")
 
-        for idx, paper in enumerate(data["papers"], start=1):
-            final_output.append(f"{idx}. **{paper['k_title']}**")
-            final_output.append(f"   - 원제: {paper['title']}")
-            final_output.append(f"   - 논문 적합도: {paper.get('paper_relevance', 'Unknown')} ({paper.get('paper_score', 0)}점)")
-            if paper.get("paper_reason"):
-                final_output.append(f"   - 적합성 근거: {paper['paper_reason']}")
-            final_output.append(f"   - 요약: {paper['summary']} ({paper['date']}, {paper['venue']})")
+        if data["papers"]:
+            lines.append("#### 📄 관련 논문")
+            for idx, paper in enumerate(data["papers"], start=1):
+                lines.append(f"{idx}. **{paper['k_title']}**")
+                lines.append(f"   - 원제: {paper['title']}")
+                lines.append(f"   - 논문 적합도: {paper.get('paper_relevance', 'Unknown')} ({paper.get('paper_score', 0)}점)")
+                if paper.get("paper_reason"):
+                    lines.append(f"   - 적합성 근거: {paper['paper_reason']}")
+                lines.append(f"   - 요약: {paper['summary']} ({paper['date']}, {paper['venue']})")
+            lines.append("")
 
-        final_output.append("")
-        final_output.append("---")
+        if data["patents"]:
+            lines.append("#### 🧾 관련 특허")
+            for idx, patent in enumerate(data["patents"], start=1):
+                lines.append(f"{idx}. **{patent['k_title']}**")
+                lines.append(f"   - 발명의 명칭: {patent['title']}")
+                lines.append(f"   - 특허 적합도: {patent.get('patent_relevance', 'Unknown')} ({patent.get('patent_score', 0)}점)")
+                if patent.get("patent_reason"):
+                    lines.append(f"   - 적합성 근거: {patent['patent_reason']}")
+                lines.append(f"   - 출원번호/일자: {patent['application_number']} / {patent['application_date']}")
+                if patent.get("register_number") or patent.get("register_date"):
+                    lines.append(f"   - 등록정보: {patent.get('register_number', '-') or '-'} / {patent.get('register_date', '-') or '-'} / {patent.get('register_status', '-') or '-'}")
+                lines.append(f"   - 출원인: {', '.join(patent.get('applicant_names', [])) or PNU_IUCF_APPLICANT_KR}")
+                lines.append(f"   - 요약: {patent['summary']}")
+            lines.append("")
 
-    report(total_steps, total_steps, "분석 완료", f"최종 매칭 교수 {len(professor_map)}명을 정리했습니다.")
-    return "\n".join(final_output)
+        lines.append("---")
+
+    return "\n".join(lines)
 
 
 # -----------------------------
 # UI
 # -----------------------------
-st.title("🎓 PNU 수요기술-연구자 매칭 시스템")
-st.caption("수요기술을 기반으로 부산대학교 연구자를 매칭합니다")
+st.title("🎓 PNU 수요기술-연구자 증거형 매칭 시스템")
+st.caption("수요기술에 맞는 부산대 논문 저자와 산학협력단 단독출원 특허 발명자를 찾고, 공식 페이지까지 확인된 교수만 출력합니다")
 
 with st.sidebar:
     st.header("설정 안내")
     st.markdown(
-        """
+        f"""
 - PDF, DOCX, TXT, MD 업로드 가능
-- 논문 기반으로 수요기술-연구자 매칭
-- 적합한 논문이 없는 경우 공개된 연구 분야 기반으로 매칭
+- OpenAlex 논문 검색 + 부산대 저자 필터링
+- KIPRIS 특허 검색 + **부산대학교 산학협력단 단독출원** 필터링
+- **공식 부산대 페이지가 확인된 교수만 출력**
+- 공식 페이지가 확인되지 않으면 이름을 추정 생성하지 않음
+- 특허 검색 환경변수: `KIPRIS_API_KEY`
+- 참고한 KIPRIS 매뉴얼 CSV: 첨부 파일 기반
         """
     )
 
-uploaded_file = st.file_uploader(
-    "1. 수요기술조사서 업로드",
-    type=["pdf", "docx", "txt", "md"]
-)
-
+uploaded_file = st.file_uploader("1. 수요기술조사서 업로드", type=["pdf", "docx", "txt", "md"])
 manual_text = st.text_area(
     "2. 또는 기술 내용 직접 입력 (선택)",
-    placeholder="기술 설명, 적용 분야, 핵심 성능, 장치/공정/소재 정보를 넣으면 연구자 매칭 정확도가 올라갑니다.",
+    placeholder="기술 설명, 적용 분야, 핵심 성능, 장치/공정/소재 정보를 넣으면 정확도가 올라갑니다.",
     height=240,
 )
 
