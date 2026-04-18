@@ -864,11 +864,77 @@ def compute_verification_score(page_text: str, candidate_names: List[str], url: 
     return score, matched_name
 
 
+def normalize_name_for_match(text: str) -> str:
+    s = str(text or "").lower()
+    s = s.replace("–", "-").replace("—", "-").replace("-", "-")
+    s = re.sub(r"[^a-z0-9가-힣]", "", s)
+    return s
+
+def extract_html_text(raw_html: str) -> str:
+    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", raw_html or "")
+    text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return normalize_space(text)
+
 @st.cache_data(show_spinner=False)
 def verify_professor_from_official_pages(author_name: str) -> Optional[Dict]:
     name = normalize_space(author_name)
     if not name:
         return None
+
+    norm_name = normalize_name_for_match(name)
+
+    candidate_urls = [
+        f"https://scholar.pusan.ac.kr/search?q={name}",
+        f"https://scholar.pusan.ac.kr/search?q={name.replace('-', ' ')}",
+    ]
+
+    # 영문 이름이면 공백 제거/하이픈 제거 버전도 같이 시도
+    compact_name = re.sub(r"[-\s]+", "", name)
+    if compact_name and compact_name != name:
+        candidate_urls.append(f"https://scholar.pusan.ac.kr/search?q={compact_name}")
+
+    for url in candidate_urls:
+        try:
+            r = SESSION.get(url, timeout=8)
+            if r.status_code != 200:
+                continue
+
+            page_text = extract_html_text(r.text)[:30000]
+            norm_page = normalize_name_for_match(page_text)
+
+            if norm_name not in norm_page:
+                continue
+
+            # scholar.pusan.ac.kr 내부에서 연구자/교수 흔적 점수화
+            score = 0
+            low_text = page_text.lower()
+            if "scholar" in url:
+                score += 2
+            if any(k in low_text for k in ["professor", "faculty", "교수", "조교수", "부교수", "정교수", "researcher", "연구자"]):
+                score += 2
+            if any(k in low_text for k in ["department", "school", "college", "학과", "학부", "대학", "전공", "연구실", "laboratory", "lab"]):
+                score += 1
+
+            if score < 2:
+                continue
+
+            evidence = extract_evidence_snippet(page_text, name)
+            dept = extract_department_from_page(page_text)
+            field = extract_field_from_page(page_text)
+
+            return {
+                "official_name": name,
+                "department": dept or "PNU Scholar 기반 확인",
+                "field": field or "Scholar 페이지 기반 확인",
+                "link": url,
+                "evidence": evidence or "scholar.pusan.ac.kr 검색 결과에서 이름 확인",
+            }
+        except Exception:
+            continue
+
+    return None
 
     candidate_names = build_name_variants(name)
     queries = []
