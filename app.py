@@ -646,26 +646,13 @@ def is_pnu_iucf_included(detail: Dict) -> bool:
     applicants = [normalize_space(x) for x in detail.get("applicant_names", []) if normalize_space(x)]
     if not applicants:
         return False
-
     for name in applicants:
-        # 1. 한글 완전 일치
         if name == PNU_IUCF_APPLICANT_KR:
             return True
-
-        # 2. 영문 포함 판정
         low = name.lower()
-        if (
-            ("pusan national university" in low or "busan national university" in low)
-            and any(hint in low for hint in PNU_IUCF_APPLICANT_EN_HINTS)
-        ):
+        if ("pusan national university" in low or "busan national university" in low) and any(h in low for h in PNU_IUCF_APPLICANT_EN_HINTS):
             return True
-
     return False
-    only = applicants[0]
-    if only == PNU_IUCF_APPLICANT_KR:
-        return True
-    low = only.lower()
-    return ("pusan national university" in low or "busan national university" in low) and any(h in low for h in PNU_IUCF_APPLICANT_EN_HINTS)
 
 
 @st.cache_data(show_spinner=False)
@@ -835,21 +822,22 @@ def fetch_page_text(url: str) -> str:
         return ""
 
 
-def compute_verification_score(page_text: str, candidate_names: List[str]) -> Tuple[int, str]:
+def compute_verification_score(page_text: str, candidate_names: List[str], url: str = "") -> Tuple[int, str]:
     low_text = page_text.lower()
     norm_page = normalize_name_for_match(page_text)
+    low_url = (url or "").lower()
 
     professor_keywords = [
         "professor", "assistant professor", "associate professor", "full professor",
-        "faculty", "faculty member", "researcher", "교수", "조교수", "부교수", "정교수", "교원"
+        "faculty", "faculty member", "researcher", "교수", "조교수", "부교수", "정교수", "교원", "전임교원", "연구자"
     ]
     department_keywords = [
         "department", "school", "college", "faculty", "lab", "laboratory",
-        "학과", "학부", "대학", "대학원", "전공", "연구실"
+        "학과", "학부", "대학", "대학원", "전공", "연구실", "scholar"
     ]
     research_keywords = [
         "research interests", "research areas", "publications", "patents",
-        "연구분야", "주요 연구분야", "논문", "특허"
+        "연구분야", "주요 연구분야", "논문", "특허", "profile", "faculty profile"
     ]
 
     matched_name = ""
@@ -869,6 +857,10 @@ def compute_verification_score(page_text: str, candidate_names: List[str]) -> Tu
         score += 2
     if any(k in low_text for k in research_keywords):
         score += 1
+    if "scholar.pusan.ac.kr" in low_url:
+        score += 2
+    if any(k in low_url for k in ["subview.do", "faculty", "professor", "research", "lab"]):
+        score += 1
     return score, matched_name
 
 
@@ -880,36 +872,45 @@ def verify_professor_from_official_pages(author_name: str) -> Optional[Dict]:
 
     candidate_names = build_name_variants(name)
     queries = []
-    for variant in candidate_names:
+    for variant in candidate_names[:5]:
         queries.extend([
             f'site:pusan.ac.kr "{variant}"',
+            f'site:scholar.pusan.ac.kr "{variant}"',
             f'site:pusan.ac.kr "{variant}" professor',
             f'site:pusan.ac.kr "{variant}" 교수',
-            f'site:scholar.pusan.ac.kr "{variant}"',
+            f'site:pusan.ac.kr "{variant}" 연구실',
+            f'site:pusan.ac.kr "{variant}" 학과',
         ])
     queries = unique_keep_order(queries)
 
     best = None
     best_score = 0
     best_name = name
+    checked_urls = set()
 
-    for query in queries[:12]:
+    for query in queries[:24]:
         results = duckduckgo_search(query, max_results=8)
         for item in results:
             url = item.get("url", "")
-            if not is_official_domain(url):
+            if not is_official_domain(url) or url in checked_urls:
                 continue
+            checked_urls.add(url)
             page_text = fetch_page_text(url)
             if not page_text:
                 continue
 
-            score, matched_name = compute_verification_score(page_text, candidate_names)
-            if score < 7:
+            score, matched_name = compute_verification_score(page_text, candidate_names, url=url)
+            if score < 5:
                 continue
 
             dept = extract_department_from_page(page_text)
             field = extract_field_from_page(page_text)
             evidence = extract_evidence_snippet(page_text, matched_name or candidate_names[0])
+            if dept:
+                score += 1
+            if field:
+                score += 1
+
             current = {
                 "official_name": matched_name or name,
                 "department": dept or "확인됨(세부 학과 추출 실패)",
@@ -1208,7 +1209,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     lines.append(f"- 적합성 통과 논문 수: **{len(valid_papers)}건** (High {high_count}건 / Medium {medium_count}건)")
     if kipris_enabled():
         lines.append(f"- 적합성 통과 특허 수: **{len(valid_patents)}건** (High {patent_high_count}건 / Medium {patent_medium_count}건)")
-        lines.append(f"- 특허 필터 기준: **부산대학교 산학협력단 단독출원**")
+        lines.append(f"- 특허 필터 기준: **출원인에 부산대학교 산학협력단 포함**")
     lines.append(f"- 검토 연구자 수(논문 저자+특허 발명자): **{len(all_people)}명**")
     lines.append(f"- 공식 페이지 검증 통과 교수 수: **{len(researcher_map)}명**")
     if unverified_authors:
@@ -1279,7 +1280,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 # UI
 # -----------------------------
 st.title("🎓 PNU 수요기술-연구자 증거형 매칭 시스템")
-st.caption("수요기술에 맞는 부산대 논문 저자와 산학협력단 단독출원 특허 발명자를 찾고, 공식 페이지까지 확인된 교수만 출력합니다")
+st.caption("수요기술에 맞는 부산대 논문 저자와 출원인에 산학협력단이 포함된 특허 발명자를 찾고, 공식 페이지까지 확인된 교수만 출력합니다")
 
 with st.sidebar:
     st.header("설정 안내")
