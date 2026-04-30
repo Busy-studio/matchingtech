@@ -27,20 +27,23 @@ st.set_page_config(
 )
 
 OPENALEX_URL = "https://api.openalex.org/works"
+
+# PNU Scholar
 PNU_SCHOLAR_API_URL = "https://scholar.pusan.ac.kr/wp-json/rm/v1/scholars"
+PNU_SCHOLAR_SEARCH_PAGE = "https://scholar.pusan.ac.kr/researchers/"
+
+# KIPRIS
 KIPRIS_BASE_URL = "https://plus.kipris.or.kr/kipo-api/kipi/patUtiModInfoSearchSevice"
 
 MAX_PAPERS = 20
 MAX_PATENTS = 20
 MAX_RESEARCHERS = 40
-MAX_SCHOLAR_PAGES = 200
-SCHOLAR_RECORD_PER_PAGE = 24
 
 MIN_RELEVANT_PAPERS = 3
 MIN_RELEVANT_PATENTS = 3
 
 REQUEST_TIMEOUT = 20
-USER_AGENT = "Mozilla/5.0 (EvidenceOnlyPNUMatcher/2.0)"
+USER_AGENT = "Mozilla/5.0 (EvidenceOnlyPNUMatcher/3.0; PNU-Scholar-Search)"
 
 PNU_IUCF_APPLICANT_KR = "부산대학교 산학협력단"
 PNU_AFFILIATION_HINTS = [
@@ -51,7 +54,13 @@ PNU_AFFILIATION_HINTS = [
 ]
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": USER_AGENT})
+SESSION.headers.update(
+    {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8",
+        "Accept-Language": "ko,en-US;q=0.9,en;q=0.8",
+    }
+)
 
 
 # =========================================================
@@ -93,7 +102,7 @@ def compact_text(text: str, limit: int = 5000) -> str:
 def strip_tags(raw_html: str) -> str:
     if not raw_html:
         return ""
-    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", raw_html)
+    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", str(raw_html))
     text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     text = html.unescape(text)
@@ -142,49 +151,6 @@ def has_english(text: str) -> bool:
     return bool(re.search(r"[A-Za-z]", str(text or "")))
 
 
-def build_name_variants(name: str) -> List[str]:
-    """
-    영문명/한글명 매칭 실패를 줄이기 위한 이름 변형 생성.
-    예:
-    - Jae-Hong Kim
-    - Jae Hong Kim
-    - JaeHongKim
-    - Kim Jae Hong
-    - Kim Jae-Hong
-    - Kim, Jae-Hong
-    """
-    base = normalize_space(name)
-    if not base:
-        return []
-
-    variants = [base]
-
-    cleaned = base.replace("–", "-").replace("—", "-").replace("-", "-")
-    variants.append(cleaned)
-    variants.append(cleaned.replace("-", " "))
-    variants.append(cleaned.replace("-", ""))
-    variants.append(cleaned.replace(" ", ""))
-    variants.append(cleaned.replace(",", ""))
-
-    tokens = re.split(r"[\s,\-]+", cleaned)
-    tokens = [t for t in tokens if t]
-
-    if len(tokens) >= 2 and all(re.search(r"[A-Za-z]", t) for t in tokens):
-        first_parts = tokens[:-1]
-        last = tokens[-1]
-        reversed_tokens = [last] + first_parts
-
-        variants.append(" ".join(reversed_tokens))
-        variants.append("-".join(reversed_tokens))
-        variants.append(",".join([last, " ".join(first_parts)]))
-        variants.append(last + "".join(first_parts))
-        variants.append("".join(reversed_tokens))
-        variants.append(" ".join(first_parts) + " " + last)
-        variants.append("".join(first_parts) + last)
-
-    return unique_keep_order(variants)
-
-
 def name_similarity(a: str, b: str) -> float:
     na = normalize_name_for_match(a)
     nb = normalize_name_for_match(b)
@@ -195,36 +161,166 @@ def name_similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, na, nb).ratio()
 
 
-def best_name_match_score(query_name: str, candidate_names: List[str]) -> Tuple[float, str]:
-    q_variants = build_name_variants(query_name)
-    c_variants = []
-    for cn in candidate_names:
-        c_variants.extend(build_name_variants(cn))
-    c_variants = unique_keep_order(c_variants)
+def build_name_variants(name: str) -> List[str]:
+    """
+    논문 저자명 / 특허 발명자명을 PNU Scholar 검색어로 변형.
+    예:
+    - Hye-Rim Bae
+    - Hye Rim Bae
+    - HyeRimBae
+    - Bae Hye Rim
+    - Bae, Hye-Rim
+    """
+    base = normalize_space(name)
+    if not base:
+        return []
 
-    best_score = 0.0
-    best_candidate = ""
+    cleaned = base.replace("–", "-").replace("—", "-").replace("-", "-")
+    variants = [
+        base,
+        cleaned,
+        cleaned.replace("-", " "),
+        cleaned.replace("-", ""),
+        cleaned.replace(" ", ""),
+        cleaned.replace(",", ""),
+    ]
 
-    for q in q_variants:
-        for c in c_variants:
-            score = name_similarity(q, c)
-            if score > best_score:
-                best_score = score
-                best_candidate = c
+    tokens = re.split(r"[\s,\-]+", cleaned)
+    tokens = [t for t in tokens if t]
 
-    return best_score, best_candidate
+    if len(tokens) >= 2 and all(re.search(r"[A-Za-z]", t) for t in tokens):
+        first_parts = tokens[:-1]
+        last = tokens[-1]
+
+        variants.extend(
+            [
+                " ".join([last] + first_parts),
+                "-".join([last] + first_parts),
+                f"{last}, {' '.join(first_parts)}",
+                f"{last}, {'-'.join(first_parts)}",
+                last + "".join(first_parts),
+                "".join([last] + first_parts),
+                " ".join(first_parts + [last]),
+                "".join(first_parts + [last]),
+            ]
+        )
+
+    return unique_keep_order(variants)
 
 
-def is_probable_name(text: str) -> bool:
-    t = normalize_space(strip_tags(text))
-    if not t:
+def split_display_name(display_name: str) -> Tuple[str, str]:
+    """
+    PNU Scholar 화면 표시명 예:
+    - Bae, Hye-Rim(배혜림)
+    - Ro, Eunseok(노은석)
+    - Yang, Jin-Young(양진영)
+
+    반환:
+    - 영문이름
+    - 한글이름
+    """
+    text = strip_tags(display_name)
+    text = normalize_space(text)
+
+    m = re.match(r"^(.*?)\((.*?)\)\s*$", text)
+    if m:
+        eng = normalize_space(m.group(1))
+        kor = normalize_space(m.group(2))
+        return eng, kor
+
+    if has_korean(text) and not has_english(text):
+        return "", text
+
+    if has_english(text) and not has_korean(text):
+        return text, ""
+
+    return text, ""
+
+
+def parse_affiliation_text(text: str) -> Tuple[str, str]:
+    """
+    화면 예:
+    - 국제학부 · 경제통상학
+    - 영어교육과 · 사범대학
+    - 생명과학과 · 자연과학대학
+
+    반환:
+    - 학과/전공
+    - 소속대학
+    """
+    text = strip_tags(text)
+    text = normalize_space(text)
+    if not text:
+        return "", ""
+
+    text = text.replace("ㆍ", "·").replace("|", "·").replace("/", "·")
+    parts = [normalize_space(p) for p in text.split("·") if normalize_space(p)]
+
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+
+    if re.search(r"(학과|학부|전공|부|과)$", text):
+        return text, ""
+
+    if re.search(r"(대학|대학원|전문대학원)$", text):
+        return "", text
+
+    return text, ""
+
+
+def format_department(affiliation: str, department: str = "", college: str = "") -> str:
+    affiliation = normalize_space(affiliation)
+    department = normalize_space(department)
+    college = normalize_space(college)
+
+    if department and college:
+        return f"{department} · {college}"
+    if affiliation:
+        return affiliation
+    if department:
+        return department
+    if college:
+        return college
+    return "PNU Scholar 검색 결과 기반 확인"
+
+
+def is_name_like(text: str) -> bool:
+    text = normalize_space(strip_tags(text))
+    if not text:
         return False
-    if len(t) > 80:
+    if len(text) > 120:
         return False
-    if re.search(r"(research|publication|department|college|university|논문|연구|학과|대학|특허)", t, re.I):
-        if len(t) > 25:
-            return False
-    return bool(re.search(r"[A-Za-z가-힣]", t))
+
+    if has_english(text) and re.search(r"\([가-힣A-Za-z\s]{2,50}\)", text):
+        return True
+
+    if re.fullmatch(r"[가-힣\s]{2,30}", text):
+        return True
+
+    if re.fullmatch(r"[A-Za-z,\-\.\s]{2,100}", text):
+        bad = ["research", "department", "college", "university", "school", "profile", "journal"]
+        return not any(b in text.lower() for b in bad)
+
+    return False
+
+
+def is_affiliation_like(text: str) -> bool:
+    text = normalize_space(strip_tags(text))
+    if not text:
+        return False
+    if len(text) > 150:
+        return False
+
+    if "·" in text and re.search(r"(학과|학부|전공|대학|대학원|School|College|Department)", text, re.I):
+        return True
+
+    if re.search(r"(학과|학부|전공|대학|대학원|전문대학원)", text):
+        return True
+
+    if re.search(r"(Department|College|School|Faculty|Division|Major)", text, re.I):
+        return True
+
+    return False
 
 
 # =========================================================
@@ -279,7 +375,7 @@ def extract_json_object(text: str) -> Dict:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
-        snippet = cleaned[start:end + 1]
+        snippet = cleaned[start : end + 1]
         try:
             return json.loads(snippet)
         except Exception:
@@ -432,7 +528,7 @@ def extract_search_profile(query_text: str) -> Dict:
 
 
 # =========================================================
-# PNU Scholar API 기반 연구자 DB
+# PNU Scholar 검색 기반 매칭
 # =========================================================
 def flatten_json_strings(obj: Any, prefix: str = "") -> Dict[str, str]:
     out = {}
@@ -474,12 +570,6 @@ def find_list_candidates(data: Any) -> List[List[Dict]]:
 
 
 def extract_scholar_records_from_response(data: Any) -> List[Dict]:
-    """
-    PNU Scholar API 응답 구조가 바뀌어도 최대한 연구자 record list를 찾기 위한 함수.
-    우선순위:
-    1) data, results, items, scholars, posts 등 명시 키
-    2) dict list 중 name/title/link 계열이 많은 리스트
-    """
     if isinstance(data, list):
         return [x for x in data if isinstance(x, dict)]
 
@@ -521,7 +611,7 @@ def extract_scholar_records_from_response(data: Any) -> List[Dict]:
                 score += 2
             if any(k in keys for k in ["link", "url", "permalink"]):
                 score += 1
-            if any(k in vals for k in ["professor", "교수", "부산", "pusan"]):
+            if any(k in vals for k in ["교수", "부산", "pusan", "department", "college"]):
                 score += 1
         score += min(len(lst), 10)
         return score
@@ -530,276 +620,417 @@ def extract_scholar_records_from_response(data: Any) -> List[Dict]:
     return candidates[0]
 
 
-def pick_first_by_key_hints(flat: Dict[str, str], hints: List[str], max_len: int = 200) -> str:
+def pick_values_by_key(flat: Dict[str, str], hints: List[str], max_len: int = 500) -> List[str]:
+    values = []
+    seen = set()
+
     for key, val in flat.items():
-        if any(h in key.lower() for h in hints):
+        k = key.lower()
+        if any(h in k for h in hints):
             v = normalize_space(val)
-            if v and len(v) <= max_len:
-                return v
-    return ""
+            if v and len(v) <= max_len and v not in seen:
+                seen.add(v)
+                values.append(v)
+
+    return values
 
 
-def pick_all_by_key_hints(flat: Dict[str, str], hints: List[str], max_len: int = 120) -> List[str]:
-    out = []
-    for key, val in flat.items():
-        if any(h in key.lower() for h in hints):
-            v = normalize_space(val)
-            if v and len(v) <= max_len:
-                out.append(v)
-    return unique_keep_order(out)
+def pick_first_by_key(flat: Dict[str, str], hints: List[str], max_len: int = 500) -> str:
+    values = pick_values_by_key(flat, hints, max_len=max_len)
+    return values[0] if values else ""
 
 
-def normalize_pnu_scholar_record(record: Dict) -> Dict:
-    flat = flatten_json_strings(record)
-    lower_keys = {k.lower(): v for k, v in flat.items()}
-
+def find_display_name_from_flat(flat: Dict[str, str]) -> str:
     name_hints = [
-        "kor_name",
-        "korean_name",
-        "kr_name",
-        "name_ko",
-        "name.kr",
-        "eng_name",
-        "english_name",
-        "en_name",
-        "name_en",
+        "title.rendered",
+        "post_title",
         "display_name",
         "full_name",
         "scholar_name",
         "researcher_name",
         "author_name",
-        "post_title",
-        "title.rendered",
-        "title",
+        "kor_name",
+        "korean_name",
+        "kr_name",
+        "eng_name",
+        "english_name",
+        "en_name",
+        "name_en",
+        "name_ko",
         "name",
+        "title",
     ]
 
-    raw_names = pick_all_by_key_hints(lower_keys, name_hints, max_len=100)
+    for hint in name_hints:
+        vals = pick_values_by_key(flat, [hint], max_len=150)
+        for v in vals:
+            cleaned = strip_tags(v)
+            if is_name_like(cleaned):
+                return cleaned
 
-    cleaned_names = []
-    for n in raw_names:
-        n = strip_tags(n)
-        n = re.sub(r"\s*[|｜].*$", "", n).strip()
-        n = re.sub(r"\s*-\s*(Professor|교수|Researcher|연구자).*$", "", n, flags=re.I).strip()
-        if is_probable_name(n):
-            cleaned_names.append(n)
+    for v in flat.values():
+        cleaned = strip_tags(v)
+        if has_english(cleaned) and re.search(r"\([가-힣A-Za-z\s]{2,50}\)", cleaned):
+            if is_name_like(cleaned):
+                return cleaned
 
-    cleaned_names = unique_keep_order(cleaned_names)
+    return ""
 
-    korean_names = [n for n in cleaned_names if has_korean(n)]
-    english_names = [n for n in cleaned_names if has_english(n)]
 
-    primary_name = ""
-    if korean_names:
-        primary_name = korean_names[0]
-    elif english_names:
-        primary_name = english_names[0]
-    elif cleaned_names:
-        primary_name = cleaned_names[0]
+def find_affiliation_from_flat(flat: Dict[str, str]) -> str:
+    affiliation_hints = [
+        "department",
+        "dept",
+        "affiliation",
+        "college",
+        "school",
+        "major",
+        "organization",
+        "org",
+        "division",
+        "faculty",
+        "belong",
+        "소속",
+        "학과",
+        "학부",
+        "대학",
+        "전공",
+    ]
 
-    department = pick_first_by_key_hints(
-        lower_keys,
+    for hint in affiliation_hints:
+        vals = pick_values_by_key(flat, [hint], max_len=300)
+        for v in vals:
+            cleaned = strip_tags(v)
+            if is_affiliation_like(cleaned):
+                return cleaned
+
+    for v in flat.values():
+        cleaned = strip_tags(v)
+        if is_affiliation_like(cleaned):
+            return cleaned
+
+    return ""
+
+
+def find_profile_link_from_flat(flat: Dict[str, str]) -> str:
+    link_hints = [
+        "permalink",
+        "profile_url",
+        "profile",
+        "link",
+        "url",
+        "href",
+        "guid.rendered",
+    ]
+
+    for hint in link_hints:
+        vals = pick_values_by_key(flat, [hint], max_len=800)
+        for v in vals:
+            link = normalize_space(v)
+            if link.startswith("/"):
+                link = "https://scholar.pusan.ac.kr" + link
+            if link.startswith("http"):
+                return link
+
+    return ""
+
+
+def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Optional[Dict]:
+    flat = flatten_json_strings(record)
+
+    display_name = find_display_name_from_flat(flat)
+    if not display_name:
+        return None
+
+    eng_name, kor_name = split_display_name(display_name)
+
+    affiliation = find_affiliation_from_flat(flat)
+    dept_major, college = parse_affiliation_text(affiliation)
+    profile_link = find_profile_link_from_flat(flat)
+
+    all_names = unique_keep_order(
         [
-            "department",
-            "dept",
-            "affiliation",
-            "college",
-            "school",
-            "major",
-            "organization",
-            "org",
-            "소속",
-            "학과",
-            "학부",
-            "대학",
-            "전공",
-        ],
-        max_len=200,
+            display_name,
+            eng_name,
+            kor_name,
+            eng_name.replace(",", "") if eng_name else "",
+            eng_name.replace("-", " ") if eng_name else "",
+            eng_name.replace("-", "") if eng_name else "",
+            eng_name.replace(" ", "") if eng_name else "",
+        ]
     )
 
-    field = pick_first_by_key_hints(
-        lower_keys,
-        [
-            "research",
-            "field",
-            "interest",
-            "keyword",
-            "area",
-            "specialty",
-            "전공분야",
-            "연구분야",
-            "관심분야",
-            "키워드",
-        ],
-        max_len=300,
-    )
-
-    link = pick_first_by_key_hints(
-        lower_keys,
-        [
-            "permalink",
-            "profile_url",
-            "profile",
-            "link",
-            "url",
-            "href",
-        ],
-        max_len=500,
-    )
-
-    if link and link.startswith("/"):
-        link = "https://scholar.pusan.ac.kr" + link
-
-    if link and not link.startswith("http"):
-        link = ""
-
-    scholar_id = pick_first_by_key_hints(
-        lower_keys,
-        [
-            "id",
-            "researcher_id",
-            "scholar_id",
-            "post_id",
-        ],
-        max_len=100,
-    )
-
-    evidence_parts = []
-    if primary_name:
-        evidence_parts.append(primary_name)
-    if department:
-        evidence_parts.append(department)
-    if field:
-        evidence_parts.append(field)
+    official_name = kor_name or eng_name or display_name
+    department = format_department(affiliation, dept_major, college)
 
     return {
-        "scholar_id": scholar_id,
-        "official_name": primary_name,
-        "all_names": cleaned_names,
-        "korean_names": korean_names,
-        "english_names": english_names,
-        "department": department or "PNU Scholar API 기반 확인",
-        "field": field or "PNU Scholar API에서 상세 연구분야 자동 추출 실패",
-        "link": link or "https://scholar.pusan.ac.kr/researchers",
-        "evidence": " / ".join(evidence_parts) if evidence_parts else "PNU Scholar API record 확인",
+        "official_name": official_name,
+        "display_name": display_name,
+        "english_name": eng_name,
+        "korean_name": kor_name,
+        "all_names": all_names,
+        "department": department,
+        "field": "PNU Scholar 연구자 검색 결과 기반 확인",
+        "link": profile_link or "https://scholar.pusan.ac.kr/researchers",
+        "evidence": f"PNU Scholar 검색어 '{search_keyword}'로 검색 결과 확인: {display_name}",
+        "source": "pnu_scholar_api",
+        "search_keyword": search_keyword,
         "raw": record,
     }
 
 
-@st.cache_data(show_spinner=False)
-def fetch_pnu_scholars_page(page: int = 1) -> List[Dict]:
-    params = {
-        "page": page,
-        "current_page": page,
-        "record_per_page": SCHOLAR_RECORD_PER_PAGE,
-        "order_by": "date",
-        "order": "desc",
-    }
+def parse_scholar_html_results(html_text: str, search_keyword: str = "") -> List[Dict]:
+    """
+    HTML 검색 페이지 fallback.
+    브라우저 화면에 보이는 '영문명(한글명)' 패턴을 우선 추출.
+    """
+    text = strip_tags(html_text)
+    results = []
 
-    try:
-        r = SESSION.get(PNU_SCHOLAR_API_URL, params=params, timeout=REQUEST_TIMEOUT)
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        records = extract_scholar_records_from_response(data)
-        return records
-    except Exception:
-        return []
+    # 예: Bae, Hye-Rim(배혜림), Ro, Eunseok(노은석)
+    pattern = r"([A-Z][A-Za-z,\-\.\s]{1,90}\([가-힣A-Za-z\s]{2,50}\))"
+    for display_name in re.findall(pattern, text):
+        display_name = normalize_space(display_name)
+        eng_name, kor_name = split_display_name(display_name)
 
-
-@st.cache_data(show_spinner=False)
-def fetch_all_pnu_scholars(max_pages: int = MAX_SCHOLAR_PAGES) -> List[Dict]:
-    scholars = []
-    seen_keys = set()
-    empty_count = 0
-
-    for page in range(1, max_pages + 1):
-        records = fetch_pnu_scholars_page(page)
-
-        if not records:
-            empty_count += 1
-            if empty_count >= 2:
-                break
+        if not display_name or not (eng_name or kor_name):
             continue
 
-        empty_count = 0
+        all_names = unique_keep_order(
+            [
+                display_name,
+                eng_name,
+                kor_name,
+                eng_name.replace(",", "") if eng_name else "",
+                eng_name.replace("-", " ") if eng_name else "",
+                eng_name.replace("-", "") if eng_name else "",
+                eng_name.replace(" ", "") if eng_name else "",
+            ]
+        )
 
-        for rec in records:
-            norm = normalize_pnu_scholar_record(rec)
-            if not norm.get("official_name") and not norm.get("all_names"):
-                continue
+        results.append(
+            {
+                "official_name": kor_name or eng_name or display_name,
+                "display_name": display_name,
+                "english_name": eng_name,
+                "korean_name": kor_name,
+                "all_names": all_names,
+                "department": "PNU Scholar 검색 결과 기반 확인",
+                "field": "PNU Scholar HTML 검색 결과 기반 확인",
+                "link": "https://scholar.pusan.ac.kr/researchers",
+                "evidence": f"PNU Scholar 검색어 '{search_keyword}'로 HTML 검색 결과 확인: {display_name}",
+                "source": "pnu_scholar_html",
+                "search_keyword": search_keyword,
+            }
+        )
 
-            key_source = norm.get("scholar_id") or "|".join(norm.get("all_names", [])) or json.dumps(rec, ensure_ascii=False)[:300]
-            key = normalize_name_for_match(key_source)
+    unique = []
+    seen = set()
 
-            if key in seen_keys:
-                continue
+    for r in results:
+        key = normalize_name_for_match(f"{r.get('display_name')}|{r.get('official_name')}")
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
 
-            seen_keys.add(key)
-            scholars.append(norm)
-
-        if len(records) < SCHOLAR_RECORD_PER_PAGE:
-            break
-
-    return scholars
+    return unique
 
 
-def match_author_to_pnu_scholar(author_name: str, scholar_db: List[Dict]) -> Optional[Dict]:
+@st.cache_data(show_spinner=False)
+def search_pnu_scholar_by_keyword(keyword: str) -> List[Dict]:
     """
-    논문 저자명 또는 특허 발명자명을 PNU Scholar API DB와 매칭.
-    - 한글명은 거의 exact 위주
-    - 영문명은 하이픈/공백/성-이름 순서 변형 허용
+    PNU Scholar 검색어 기반 조회.
+    1순위: /wp-json/rm/v1/scholars?sub_ks=검색어&order_by=score
+    2순위: /researchers/?sub_ks=검색어&order_by=score HTML 검색
+    """
+    keyword = normalize_space(keyword)
+    if not keyword:
+        return []
+
+    results = []
+
+    # 1) API 검색
+    try:
+        params = {
+            "sub_ks": keyword,
+            "order_by": "score",
+            "order": "desc",
+            "record_per_page": 12,
+            "page": 1,
+            "current_page": 1,
+        }
+
+        r = SESSION.get(PNU_SCHOLAR_API_URL, params=params, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
+            data = r.json()
+            records = extract_scholar_records_from_response(data)
+            for rec in records:
+                norm = normalize_scholar_api_record(rec, search_keyword=keyword)
+                if norm:
+                    results.append(norm)
+    except Exception:
+        pass
+
+    if results:
+        return dedupe_scholar_results(results)
+
+    # 2) HTML 검색 fallback
+    try:
+        params = {
+            "sub_ks": keyword,
+            "order_by": "score",
+        }
+
+        r = SESSION.get(PNU_SCHOLAR_SEARCH_PAGE, params=params, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
+            results = parse_scholar_html_results(r.text, search_keyword=keyword)
+            if results:
+                return dedupe_scholar_results(results)
+    except Exception:
+        pass
+
+    return []
+
+
+def dedupe_scholar_results(results: List[Dict]) -> List[Dict]:
+    unique = []
+    seen = set()
+
+    for r in results:
+        key = normalize_name_for_match(
+            f"{r.get('display_name')}|{r.get('english_name')}|{r.get('korean_name')}|{r.get('link')}"
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
+
+    return unique
+
+
+def score_scholar_result_against_author(author_name: str, result: Dict) -> Tuple[float, str]:
+    candidate_names = result.get("all_names", []) or []
+    candidate_names.extend(
+        [
+            result.get("display_name", ""),
+            result.get("english_name", ""),
+            result.get("korean_name", ""),
+            result.get("official_name", ""),
+        ]
+    )
+    candidate_names = unique_keep_order(candidate_names)
+
+    variants = build_name_variants(author_name)
+    best_score = 0.0
+    best_variant = ""
+
+    for q in variants:
+        for c in candidate_names:
+            score = name_similarity(q, c)
+            if score > best_score:
+                best_score = score
+                best_variant = c
+
+    # 한글 이름 exact 강화
+    if has_korean(author_name):
+        q_norm = normalize_name_for_match(author_name)
+        for c in candidate_names:
+            if q_norm and q_norm == normalize_name_for_match(c):
+                return 1.0, c
+
+    return best_score, best_variant
+
+
+def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
+    """
+    논문 저자명 또는 특허 발명자명을 PNU Scholar 검색창에 직접 넣어 확인.
+    - 전체 DB 수집하지 않음
+    - 검색어 변형 후 sub_ks 검색
+    - API 검색 먼저, HTML fallback
     """
     name = normalize_space(author_name)
     if not name:
         return None
 
+    search_queries = build_name_variants(name)
+    all_results = []
+
+    for q in search_queries[:10]:
+        results = search_pnu_scholar_by_keyword(q)
+
+        if results:
+            for r in results:
+                r["used_query"] = q
+            all_results.extend(results)
+
+        # 너무 많이 때리지 않도록 약간 쉬기
+        time.sleep(0.12)
+
+        # 상위 검색어에서 결과가 충분히 나오면 중단
+        if len(all_results) >= 5:
+            break
+
+    all_results = dedupe_scholar_results(all_results)
+
+    if not all_results:
+        return None
+
     best = None
     best_score = 0.0
+    best_variant = ""
 
-    query_is_korean = has_korean(name)
-
-    for scholar in scholar_db:
-        candidate_names = scholar.get("all_names", []) or []
-        if not candidate_names:
-            continue
-
-        score, matched_variant = best_name_match_score(name, candidate_names)
-
-        # 한글명은 짧아서 유사도 오탐이 많으므로 기준 강화
-        if query_is_korean:
-            query_norm = normalize_name_for_match(name)
-            cand_norms = [normalize_name_for_match(c) for c in candidate_names]
-
-            if query_norm in cand_norms:
-                score = 1.0
-            elif len(query_norm) <= 4:
-                # 김철수 같은 3글자명은 유사도만으로 매칭하지 않음
-                score = 0.0
-
+    for r in all_results:
+        score, matched_variant = score_scholar_result_against_author(name, r)
         if score > best_score:
             best_score = score
-            best = {
-                **scholar,
-                "match_score": round(score, 3),
-                "matched_variant": matched_variant,
-                "query_name": name,
-            }
+            best_variant = matched_variant
+            best = r
 
     if not best:
         return None
 
-    # 기준값
-    # - 한글 exact: 1.0
-    # - 영문명 변형: 0.88 이상
-    # - 긴 영문명은 0.84 이상도 허용
-    if query_is_korean:
-        return best if best_score >= 0.99 else None
+    # 검색 결과가 나왔더라도 완전 무관 오탐 방지
+    if has_korean(name):
+        threshold = 0.99
+    else:
+        norm_len = len(normalize_name_for_match(name))
+        threshold = 0.78 if norm_len >= 10 else 0.82
 
-    if len(normalize_name_for_match(name)) >= 10:
-        return best if best_score >= 0.84 else None
+    # PNU Scholar 검색어 자체가 매우 정확하면 score가 낮아도 보조 허용
+    # 예: API 결과 display_name 파싱이 애매한 경우
+    query_exact_hit = False
+    for q in search_queries:
+        qn = normalize_name_for_match(q)
+        display_blob = normalize_name_for_match(
+            " ".join(
+                [
+                    best.get("display_name", ""),
+                    best.get("english_name", ""),
+                    best.get("korean_name", ""),
+                    best.get("official_name", ""),
+                ]
+            )
+        )
+        if qn and qn in display_blob:
+            query_exact_hit = True
+            break
 
-    return best if best_score >= 0.88 else None
+    if best_score < threshold and not query_exact_hit:
+        return None
+
+    used_query = best.get("used_query") or best.get("search_keyword") or search_queries[0]
+
+    best["verified"] = True
+    best["match_score"] = round(max(best_score, 0.8 if query_exact_hit else best_score), 3)
+    best["matched_variant"] = best_variant
+    best["query_name"] = name
+    best["evidence"] = (
+        f"PNU Scholar 연구자 검색에서 '{used_query}' 검색 결과 확인: "
+        f"{best.get('display_name') or best.get('official_name')}"
+    )
+
+    return best
 
 
 # =========================================================
@@ -1450,26 +1681,27 @@ def summarize_patents(valid_patents: List[Dict]) -> Dict[str, Dict[str, str]]:
 # =========================================================
 # 연구자 맵 구성
 # =========================================================
-def make_unverified_researcher(
-    name: str,
-    source_type: str,
-) -> Dict:
+def make_unverified_researcher(name: str, source_type: str) -> Dict:
     if source_type == "paper":
-        evidence = "OpenAlex 논문 저자 정보에서 부산대 소속으로 확인되었으나, PNU Scholar API 자동 매칭은 실패함"
+        evidence = "OpenAlex 논문 저자 정보에서 부산대 소속으로 확인되었으나, PNU Scholar 연구자 검색에서는 자동 확인되지 않음"
         field = "논문 저자 및 부산대 소속 정보 기준 후보"
     else:
-        evidence = "KIPRIS 특허 발명자 정보에서 확인되었으나, PNU Scholar API 자동 매칭은 실패함"
+        evidence = "KIPRIS 특허 발명자 정보에서 확인되었으나, PNU Scholar 연구자 검색에서는 자동 확인되지 않음"
         field = "특허 발명자 정보 기준 후보"
 
     return {
         "official_name": name,
-        "department": "PNU Scholar 자동 매칭 미확인",
+        "department": "PNU Scholar 검색 미확인",
         "field": field,
         "link": "#",
         "evidence": evidence,
         "verified": False,
         "match_score": 0,
         "matched_variant": "",
+        "display_name": name,
+        "english_name": name if has_english(name) else "",
+        "korean_name": name if has_korean(name) else "",
+        "search_keyword": "",
     }
 
 
@@ -1515,6 +1747,10 @@ def build_researcher_map(
                     "verified": bool(db.get("verified", False)),
                     "match_score": db.get("match_score", 0),
                     "matched_variant": db.get("matched_variant", ""),
+                    "display_name": db.get("display_name", ""),
+                    "english_name": db.get("english_name", ""),
+                    "korean_name": db.get("korean_name", ""),
+                    "search_keyword": db.get("search_keyword", "") or db.get("used_query", ""),
                     "papers": [],
                     "patents": [],
                 }
@@ -1556,6 +1792,10 @@ def build_researcher_map(
                     "verified": bool(db.get("verified", False)),
                     "match_score": db.get("match_score", 0),
                     "matched_variant": db.get("matched_variant", ""),
+                    "display_name": db.get("display_name", ""),
+                    "english_name": db.get("english_name", ""),
+                    "korean_name": db.get("korean_name", ""),
+                    "search_keyword": db.get("search_keyword", "") or db.get("used_query", ""),
                     "papers": [],
                     "patents": [],
                 }
@@ -1612,7 +1852,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         if progress_callback:
             progress_callback(step, total, label, detail)
 
-    total_steps = 12 if kipris_enabled() else 9
+    total_steps = 11 if kipris_enabled() else 8
 
     report(0, total_steps, "입력 확인", "파일 또는 직접 입력 내용을 점검하는 중입니다.")
     query_text = (file_text(uploaded_file) if uploaded_file else "").strip() or (manual_text or "").strip()
@@ -1620,13 +1860,10 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     if len(query_text) < 5:
         return "분석할 내용이 없습니다. 파일을 업로드하거나 내용을 입력해주세요."
 
-    report(1, total_steps, "PNU Scholar 연구자 DB 수집", "PNU Scholar API에서 부산대 연구자 목록을 불러오는 중입니다.")
-    scholar_db = fetch_all_pnu_scholars()
-
-    report(2, total_steps, "기본 정보 추출", "기업명과 수요기술 요약을 정리하는 중입니다.")
+    report(1, total_steps, "기본 정보 추출", "기업명과 수요기술 요약을 정리하는 중입니다.")
     request_meta = extract_request_metadata(query_text)
 
-    report(3, total_steps, "기술 프로파일 생성", "논문/특허 검색용 키워드를 만드는 중입니다.")
+    report(2, total_steps, "기술 프로파일 생성", "논문/특허 검색용 키워드를 만드는 중입니다.")
     profile = extract_search_profile(query_text)
 
     if not request_meta.get("tech_summary") and profile.get("korean_summary"):
@@ -1635,17 +1872,17 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     keywords_text = ", ".join(profile.get("search_keywords", []))
     patent_keywords_text = ", ".join(profile.get("korean_patent_keywords", []))
 
-    report(4, total_steps, "논문 검색", "OpenAlex에서 부산대 관련 논문을 수집하는 중입니다.")
+    report(3, total_steps, "논문 검색", "OpenAlex에서 부산대 관련 논문을 수집하는 중입니다.")
     raw_papers = search_openalex(
         tuple(profile.get("search_keywords", [])),
         tuple(profile.get("applications", [])),
         tuple(profile.get("core_tech", [])),
     )
 
-    report(5, total_steps, "부산대 논문 필터링", f"수집 논문 {len(raw_papers)}건에서 부산대 저자를 식별하는 중입니다.")
+    report(4, total_steps, "부산대 논문 필터링", f"수집 논문 {len(raw_papers)}건에서 부산대 저자를 식별하는 중입니다.")
     pnu_papers, paper_authors = filter_pnu_papers(raw_papers)
 
-    report(6, total_steps, "논문 적합성 검토", f"부산대 논문 {len(pnu_papers)}건의 적합도를 평가하는 중입니다.")
+    report(5, total_steps, "논문 적합성 검토", f"부산대 논문 {len(pnu_papers)}건의 적합도를 평가하는 중입니다.")
     paper_relevance_map = score_paper_relevance(
         pnu_papers,
         profile,
@@ -1669,13 +1906,13 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     patent_inventors = []
 
     if kipris_enabled():
-        report(7, total_steps, "특허 검색", "KIPRIS에서 수요기술 연관 특허를 검색하는 중입니다.")
+        report(6, total_steps, "특허 검색", "KIPRIS에서 수요기술 연관 특허를 검색하는 중입니다.")
         raw_patents = search_kipris_patents(tuple(profile.get("korean_patent_keywords", [])))
 
-        report(8, total_steps, "부산대 특허 필터링", f"수집 특허 {len(raw_patents)}건에서 부산대 출원 여부를 확인하는 중입니다.")
+        report(7, total_steps, "부산대 특허 필터링", f"수집 특허 {len(raw_patents)}건에서 부산대 출원 여부를 확인하는 중입니다.")
         pnu_patents, patent_inventors = enrich_and_filter_pnu_iucf_patents(raw_patents)
 
-        report(9, total_steps, "특허 적합성 검토", f"부산대 특허 {len(pnu_patents)}건의 적합도를 평가하는 중입니다.")
+        report(8, total_steps, "특허 적합성 검토", f"부산대 특허 {len(pnu_patents)}건의 적합도를 평가하는 중입니다.")
         patent_relevance_map = score_patent_relevance(
             pnu_patents,
             profile,
@@ -1686,26 +1923,26 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         if not valid_patents:
             valid_patents = pnu_patents[:MIN_RELEVANT_PATENTS]
 
-        match_step = 10
-        summarize_step = 11
+        match_step = 9
+        summarize_step = 10
     else:
-        match_step = 7
-        summarize_step = 8
+        match_step = 6
+        summarize_step = 7
 
     all_people = unique_keep_order(filtered_paper_authors + patent_inventors)[:MAX_RESEARCHERS]
 
     report(
         match_step,
         total_steps,
-        "PNU Scholar 연구자명 매칭",
-        f"논문 저자/특허 발명자 {len(all_people)}명을 PNU Scholar API 연구자 DB와 비교하는 중입니다.",
+        "PNU Scholar 연구자 검색",
+        f"논문 저자/특허 발명자 {len(all_people)}명을 PNU Scholar 검색창 방식으로 확인하는 중입니다.",
     )
 
     scholar_matches = {}
     unmatched_people = []
 
     for name in all_people:
-        matched = match_author_to_pnu_scholar(name, scholar_db)
+        matched = match_author_to_pnu_scholar(name)
         if matched:
             matched["verified"] = True
             scholar_matches[name] = matched
@@ -1716,7 +1953,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         summarize_step,
         total_steps,
         "요약 및 결과 정리",
-        f"PNU Scholar 매칭 성공 {len(scholar_matches)}명, 미매칭 {len(unmatched_people)}명을 정리하는 중입니다.",
+        f"PNU Scholar 검색 확인 {len(scholar_matches)}명, 미확인 {len(unmatched_people)}명을 정리하는 중입니다.",
     )
 
     parsed_papers = summarize_papers(valid_papers)
@@ -1755,7 +1992,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 
     lines.append("")
     lines.append("### 📊 분석 요약")
-    lines.append(f"- PNU Scholar API 수집 연구자 수: **{len(scholar_db)}명**")
+    lines.append("- PNU Scholar 확인 방식: **연구자 검색창 sub_ks 검색 기반 확인**")
     lines.append(f"- 검토 논문 수: **{len(pnu_papers)}건**")
     lines.append(f"- 적합성 통과 논문 수: **{len(valid_papers)}건** (High {high_count}건 / Medium {medium_count}건)")
 
@@ -1767,11 +2004,11 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 
     lines.append(f"- 검토 연구자 수: **{len(all_people)}명**")
     lines.append(f"- 최종 추천 후보 수: **{len(researcher_map)}명**")
-    lines.append(f"- PNU Scholar 매칭 완료: **{verified_count}명**")
-    lines.append(f"- 논문/특허 기반 미매칭 후보: **{unverified_count}명**")
+    lines.append(f"- PNU Scholar 검색 확인: **{verified_count}명**")
+    lines.append(f"- 논문/특허 기반 미확인 후보: **{unverified_count}명**")
 
     if unmatched_people:
-        lines.append(f"- 미매칭 후보 일부: {', '.join(unmatched_people[:15])}")
+        lines.append(f"- 미확인 후보 일부: {', '.join(unmatched_people[:15])}")
 
     lines.append("")
     lines.append("---")
@@ -1797,12 +2034,8 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     )
 
     for name, data in sorted_researchers:
-        verify_label = "PNU Scholar 매칭 완료" if data.get("verified") else "논문/특허 기반 후보"
-
-        if data.get("verified"):
-            header_icon = "🏫"
-        else:
-            header_icon = "🟡"
+        verify_label = "PNU Scholar 검색 확인" if data.get("verified") else "논문/특허 기반 후보"
+        header_icon = "🏫" if data.get("verified") else "🟡"
 
         lines.append(f"## {header_icon} {data['dept']} | {name}")
         lines.append(f"- **검증 상태:** {verify_label}")
@@ -1812,10 +2045,15 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
             if qnames and qnames != name:
                 lines.append(f"- **원천 데이터상 이름:** {qnames}")
 
+        if data.get("display_name"):
+            lines.append(f"- **PNU Scholar 표시명:** {data.get('display_name')}")
+
         if data.get("verified"):
             lines.append(f"- **매칭 점수:** {data.get('match_score', 0)}")
             if data.get("matched_variant"):
                 lines.append(f"- **매칭 이름 변형:** {data.get('matched_variant')}")
+            if data.get("search_keyword"):
+                lines.append(f"- **검색어:** {data.get('search_keyword')}")
 
         lines.append(f"- **근거:** {data['evidence']}")
         lines.append(f"- **주요 연구분야:** {data['field']}")
@@ -1879,7 +2117,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 st.title("🎓 PNU 수요기술-연구자 증거형 매칭 시스템")
 st.caption(
     "수요기술에 맞는 부산대 논문 저자와 특허 발명자를 찾고, "
-    "PNU Scholar API 기반 연구자 DB와 이름을 매칭합니다."
+    "PNU Scholar 연구자 검색창 방식으로 실제 검색 결과를 확인합니다."
 )
 
 with st.sidebar:
@@ -1892,15 +2130,40 @@ with st.sidebar:
 - `OPENALEX_API_KEY`: 선택사항. 없어도 OpenAlex 검색 가능
 - `KIPRIS_API_KEY`: 있으면 특허 검색 포함, 없으면 논문만 분석
 
-### 주요 변경점
+### 매칭 방식
 
-- 기존 검색페이지 크롤링 방식 제거
-- PNU Scholar 실제 API 직접 호출
-- 영문명/한글명/하이픈 이름 변형 매칭
-- 공식 매칭 실패자도 후보로 표시
-- 검증 완료 후보와 미검증 후보 구분 출력
+- 기존 전체 연구자 DB 수집 방식 제거
+- 논문 저자명/특허 발명자명을 PNU Scholar 검색어로 변환
+- `/wp-json/rm/v1/scholars?sub_ks=검색어&order_by=score` 우선 조회
+- 실패 시 `/researchers/?sub_ks=검색어&order_by=score` HTML 검색 결과 보조 확인
+- 검색 확인 후보와 미확인 후보를 구분 출력
         """
     )
+
+debug_name = st.sidebar.text_input(
+    "디버그: PNU Scholar 이름 직접 검색",
+    placeholder="예: Hye-Rim Bae 또는 배혜림",
+)
+
+if debug_name:
+    st.sidebar.markdown("#### 검색 결과")
+    debug_match = match_author_to_pnu_scholar(debug_name)
+    if debug_match:
+        st.sidebar.success("검색 확인됨")
+        st.sidebar.json(
+            {
+                "입력이름": debug_name,
+                "공식표시명": debug_match.get("display_name"),
+                "한글이름": debug_match.get("korean_name"),
+                "영문이름": debug_match.get("english_name"),
+                "소속": debug_match.get("department"),
+                "검색어": debug_match.get("search_keyword") or debug_match.get("used_query"),
+                "매칭점수": debug_match.get("match_score"),
+                "링크": debug_match.get("link"),
+            }
+        )
+    else:
+        st.sidebar.warning("검색 결과 자동 확인 실패")
 
 uploaded_file = st.file_uploader(
     "1. 수요기술조사서 업로드",
