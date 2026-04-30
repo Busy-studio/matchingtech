@@ -28,11 +28,9 @@ st.set_page_config(
 
 OPENALEX_URL = "https://api.openalex.org/works"
 
-# PNU Scholar
 PNU_SCHOLAR_API_URL = "https://scholar.pusan.ac.kr/wp-json/rm/v1/scholars"
 PNU_SCHOLAR_SEARCH_PAGE = "https://scholar.pusan.ac.kr/researchers/"
 
-# KIPRIS
 KIPRIS_BASE_URL = "https://plus.kipris.or.kr/kipo-api/kipi/patUtiModInfoSearchSevice"
 
 MAX_PAPERS = 20
@@ -43,7 +41,7 @@ MIN_RELEVANT_PAPERS = 3
 MIN_RELEVANT_PATENTS = 3
 
 REQUEST_TIMEOUT = 20
-USER_AGENT = "Mozilla/5.0 (EvidenceOnlyPNUMatcher/3.0; PNU-Scholar-Search)"
+USER_AGENT = "Mozilla/5.0 (EvidenceOnlyPNUMatcher/3.1; PNU-Scholar-Search)"
 
 PNU_IUCF_APPLICANT_KR = "부산대학교 산학협력단"
 PNU_AFFILIATION_HINTS = [
@@ -162,15 +160,6 @@ def name_similarity(a: str, b: str) -> float:
 
 
 def build_name_variants(name: str) -> List[str]:
-    """
-    논문 저자명 / 특허 발명자명을 PNU Scholar 검색어로 변형.
-    예:
-    - Hye-Rim Bae
-    - Hye Rim Bae
-    - HyeRimBae
-    - Bae Hye Rim
-    - Bae, Hye-Rim
-    """
     base = normalize_space(name)
     if not base:
         return []
@@ -209,16 +198,6 @@ def build_name_variants(name: str) -> List[str]:
 
 
 def split_display_name(display_name: str) -> Tuple[str, str]:
-    """
-    PNU Scholar 화면 표시명 예:
-    - Bae, Hye-Rim(배혜림)
-    - Ro, Eunseok(노은석)
-    - Yang, Jin-Young(양진영)
-
-    반환:
-    - 영문이름
-    - 한글이름
-    """
     text = strip_tags(display_name)
     text = normalize_space(text)
 
@@ -238,16 +217,6 @@ def split_display_name(display_name: str) -> Tuple[str, str]:
 
 
 def parse_affiliation_text(text: str) -> Tuple[str, str]:
-    """
-    화면 예:
-    - 국제학부 · 경제통상학
-    - 영어교육과 · 사범대학
-    - 생명과학과 · 자연과학대학
-
-    반환:
-    - 학과/전공
-    - 소속대학
-    """
     text = strip_tags(text)
     text = normalize_space(text)
     if not text:
@@ -357,7 +326,7 @@ def file_text(uploaded_file) -> str:
 
 
 # =========================================================
-# Gemini JSON 처리
+# Gemini 처리
 # =========================================================
 @st.cache_data(show_spinner=False)
 def extract_json_object(text: str) -> Dict:
@@ -475,52 +444,100 @@ def extract_search_profile(query_text: str) -> Dict:
     for token in [x.strip(",.()[]{}") for x in query_text.replace("\n", " ").split() if x.strip()]:
         if len(token) >= 3:
             fallback_tokens.append(token)
-        if len(fallback_tokens) >= 8:
+        if len(fallback_tokens) >= 10:
             break
 
     prompt = f"""
-당신은 대학 산학협력용 검색 프로파일 설계기입니다.
-아래 수요기술 설명을 바탕으로 논문/특허 검색용 키워드 JSON을 작성하세요.
+당신은 대학 산학협력 기술수요를 논문·특허 검색에 최적화하는 전문 검색전략 설계기입니다.
 
-반드시 포함할 항목:
-- core_tech: 핵심 기술 2~4개, 영어
-- materials_or_methods: 재료/방법 2~4개, 영어
-- properties: 요구 특성 1~4개, 영어
-- applications: 적용처 1~3개, 영어
-- search_keywords: 논문 검색용 핵심 키워드 4~6개, 영어 짧은 구
-- korean_patent_keywords: 특허 검색용 한국어 핵심 키워드 4~8개
-- exclude_keywords: 배제 키워드 0~4개, 영어
-- korean_summary: 한국어 한두 문장
+아래 입력문은 기업 또는 수요자가 자유롭게 작성한 기술 설명입니다.
+입력문을 그대로 검색하지 말고, 논문·특허 검색에 적합하도록 기술 개념을 정규화하고 확장하세요.
 
-출력은 JSON만 반환.
+목표:
+- OpenAlex 논문 검색에서 부산대학교 연구자 논문이 잘 검색되도록 영어 검색어를 구성
+- KIPRIS 특허 검색에서 부산대학교/부산대학교 산학협력단 특허가 잘 검색되도록 한국어 검색어를 구성
+- 너무 넓은 일반어는 줄이고, 장치·소재·공정·알고리즘·성능·적용분야 중심으로 구체화
+- 기업명, 사업명, 지역명, 불필요한 행정 문구는 검색 키워드에서 제외
+- 기술이 너무 포괄적이면 세부기술 후보를 2~4개로 나누어 검색 가능하게 구성
 
-입력:
-{compact_text(query_text)}
+반드시 JSON만 출력하세요.
+
+출력 형식:
+{{
+  "optimized_query_ko": "입력 기술을 검색 친화적으로 정리한 한국어 설명 2~3문장",
+  "optimized_query_en": "Search-optimized English technical description in 2-3 sentences",
+  "core_tech": ["핵심 기술 영어 2~5개"],
+  "materials_or_methods": ["소재/방법/공정/알고리즘 영어 2~6개"],
+  "properties": ["성능/특성 영어 2~5개"],
+  "applications": ["적용처 영어 1~4개"],
+  "search_keywords": ["OpenAlex용 짧은 영어 키워드 6~10개"],
+  "openalex_queries": [
+    "핵심기술 + 적용처 + Pusan National University",
+    "소재/방법 + 성능 + Pusan National University",
+    "핵심기술 동의어 + Busan National University"
+  ],
+  "korean_patent_keywords": ["KIPRIS 특허 검색용 한국어 키워드 6~12개"],
+  "exclude_keywords": ["배제 키워드 영어 0~5개"],
+  "korean_summary": "수요기술 요약 1~2문장"
+}}
+
+검색어 작성 규칙:
+- openalex_queries는 실제 검색창에 넣을 수 있는 짧은 영어 구문으로 작성
+- 각 openalex_queries에는 가능하면 Pusan National University 또는 Busan National University를 포함
+- search_keywords는 1~4단어 이내의 짧은 기술명 중심
+- korean_patent_keywords는 명사형 중심으로 작성
+- 약어가 있으면 풀네임과 약어를 모두 고려
+- 의료·바이오·로봇·AI·소재·반도체 등 분야별 전문용어를 적극 반영
+- 단, 입력문에 없는 기술을 과도하게 창작하지 말 것
+
+입력문:
+{compact_text(query_text, 7000)}
 """
+
     data = safe_gemini_json(prompt)
 
-    if isinstance(data, dict) and data.get("search_keywords"):
-        for key in [
+    if isinstance(data, dict) and (data.get("search_keywords") or data.get("openalex_queries")):
+        list_keys = [
             "core_tech",
             "materials_or_methods",
             "properties",
             "applications",
             "search_keywords",
+            "openalex_queries",
             "korean_patent_keywords",
             "exclude_keywords",
-        ]:
+        ]
+
+        for key in list_keys:
             data[key] = [str(x).strip() for x in data.get(key, []) if str(x).strip()]
+
+        data["optimized_query_ko"] = str(data.get("optimized_query_ko", "")).strip()
+        data["optimized_query_en"] = str(data.get("optimized_query_en", "")).strip()
         data["korean_summary"] = str(data.get("korean_summary", "")).strip()
+
+        if not data.get("openalex_queries"):
+            base = data.get("search_keywords", [])[:4]
+            data["openalex_queries"] = [
+                " ".join(base[:3]) + " Pusan National University",
+                " ".join(base[:3]) + " Busan National University",
+            ]
+
         return data
 
-    fallback = fallback_tokens[:6] or ["Pusan National University"]
+    fallback = fallback_tokens[:8] or ["Pusan National University"]
 
     return {
-        "core_tech": fallback[:2],
-        "materials_or_methods": fallback[2:4],
+        "optimized_query_ko": "입력된 기술 설명을 바탕으로 논문·특허 검색용 키워드를 구성했습니다.",
+        "optimized_query_en": "Search profile generated from the provided technology description.",
+        "core_tech": fallback[:3],
+        "materials_or_methods": fallback[3:6],
         "properties": [],
         "applications": [],
         "search_keywords": fallback,
+        "openalex_queries": [
+            " ".join(fallback[:3]) + " Pusan National University",
+            " ".join(fallback[:3]) + " Busan National University",
+        ],
         "korean_patent_keywords": fallback,
         "exclude_keywords": [],
         "korean_summary": "입력된 수요기술 설명을 바탕으로 검색 키워드를 구성했습니다.",
@@ -633,11 +650,6 @@ def pick_values_by_key(flat: Dict[str, str], hints: List[str], max_len: int = 50
                 values.append(v)
 
     return values
-
-
-def pick_first_by_key(flat: Dict[str, str], hints: List[str], max_len: int = 500) -> str:
-    values = pick_values_by_key(flat, hints, max_len=max_len)
-    return values[0] if values else ""
 
 
 def find_display_name_from_flat(flat: Dict[str, str]) -> str:
@@ -780,14 +792,9 @@ def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Opti
 
 
 def parse_scholar_html_results(html_text: str, search_keyword: str = "") -> List[Dict]:
-    """
-    HTML 검색 페이지 fallback.
-    브라우저 화면에 보이는 '영문명(한글명)' 패턴을 우선 추출.
-    """
     text = strip_tags(html_text)
     results = []
 
-    # 예: Bae, Hye-Rim(배혜림), Ro, Eunseok(노은석)
     pattern = r"([A-Z][A-Za-z,\-\.\s]{1,90}\([가-힣A-Za-z\s]{2,50}\))"
     for display_name in re.findall(pattern, text):
         display_name = normalize_space(display_name)
@@ -837,20 +844,30 @@ def parse_scholar_html_results(html_text: str, search_keyword: str = "") -> List
     return unique
 
 
+def dedupe_scholar_results(results: List[Dict]) -> List[Dict]:
+    unique = []
+    seen = set()
+
+    for r in results:
+        key = normalize_name_for_match(
+            f"{r.get('display_name')}|{r.get('english_name')}|{r.get('korean_name')}|{r.get('link')}"
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
+
+    return unique
+
+
 @st.cache_data(show_spinner=False)
 def search_pnu_scholar_by_keyword(keyword: str) -> List[Dict]:
-    """
-    PNU Scholar 검색어 기반 조회.
-    1순위: /wp-json/rm/v1/scholars?sub_ks=검색어&order_by=score
-    2순위: /researchers/?sub_ks=검색어&order_by=score HTML 검색
-    """
     keyword = normalize_space(keyword)
     if not keyword:
         return []
 
     results = []
 
-    # 1) API 검색
     try:
         params = {
             "sub_ks": keyword,
@@ -875,7 +892,6 @@ def search_pnu_scholar_by_keyword(keyword: str) -> List[Dict]:
     if results:
         return dedupe_scholar_results(results)
 
-    # 2) HTML 검색 fallback
     try:
         params = {
             "sub_ks": keyword,
@@ -891,22 +907,6 @@ def search_pnu_scholar_by_keyword(keyword: str) -> List[Dict]:
         pass
 
     return []
-
-
-def dedupe_scholar_results(results: List[Dict]) -> List[Dict]:
-    unique = []
-    seen = set()
-
-    for r in results:
-        key = normalize_name_for_match(
-            f"{r.get('display_name')}|{r.get('english_name')}|{r.get('korean_name')}|{r.get('link')}"
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(r)
-
-    return unique
 
 
 def score_scholar_result_against_author(author_name: str, result: Dict) -> Tuple[float, str]:
@@ -932,7 +932,6 @@ def score_scholar_result_against_author(author_name: str, result: Dict) -> Tuple
                 best_score = score
                 best_variant = c
 
-    # 한글 이름 exact 강화
     if has_korean(author_name):
         q_norm = normalize_name_for_match(author_name)
         for c in candidate_names:
@@ -943,12 +942,6 @@ def score_scholar_result_against_author(author_name: str, result: Dict) -> Tuple
 
 
 def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
-    """
-    논문 저자명 또는 특허 발명자명을 PNU Scholar 검색창에 직접 넣어 확인.
-    - 전체 DB 수집하지 않음
-    - 검색어 변형 후 sub_ks 검색
-    - API 검색 먼저, HTML fallback
-    """
     name = normalize_space(author_name)
     if not name:
         return None
@@ -964,10 +957,8 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
                 r["used_query"] = q
             all_results.extend(results)
 
-        # 너무 많이 때리지 않도록 약간 쉬기
         time.sleep(0.12)
 
-        # 상위 검색어에서 결과가 충분히 나오면 중단
         if len(all_results) >= 5:
             break
 
@@ -990,15 +981,12 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
     if not best:
         return None
 
-    # 검색 결과가 나왔더라도 완전 무관 오탐 방지
     if has_korean(name):
         threshold = 0.99
     else:
         norm_len = len(normalize_name_for_match(name))
         threshold = 0.78 if norm_len >= 10 else 0.82
 
-    # PNU Scholar 검색어 자체가 매우 정확하면 score가 낮아도 보조 허용
-    # 예: API 결과 display_name 파싱이 애매한 경우
     query_exact_hit = False
     for q in search_queries:
         qn = normalize_name_for_match(q)
@@ -1025,6 +1013,7 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
     best["match_score"] = round(max(best_score, 0.8 if query_exact_hit else best_score), 3)
     best["matched_variant"] = best_variant
     best["query_name"] = name
+    best["search_keyword"] = used_query
     best["evidence"] = (
         f"PNU Scholar 연구자 검색에서 '{used_query}' 검색 결과 확인: "
         f"{best.get('display_name') or best.get('official_name')}"
@@ -1052,27 +1041,32 @@ def reconstruct_abstract(inverted_index):
 
 @st.cache_data(show_spinner=False)
 def search_openalex(
-    search_keywords: Tuple[str, ...],
+    search_terms: Tuple[str, ...],
     applications: Tuple[str, ...],
     core_tech: Tuple[str, ...],
 ) -> List[Dict]:
-    keywords = list(search_keywords)
+    terms = list(search_terms)
     apps = list(applications)
     techs = list(core_tech)
 
     queries = []
-    base = keywords[:4] if keywords else techs[:3]
 
-    if base:
-        queries.append(" ".join(base[:3]) + " Pusan National University")
-        queries.append(" ".join(base[:2]) + " Busan National University")
-        queries.append(" ".join(base[:3]))
+    for term in terms[:8]:
+        term = normalize_space(term)
+        if not term:
+            continue
+
+        if "pusan national university" in term.lower() or "busan national university" in term.lower():
+            queries.append(term)
+        else:
+            queries.append(term + " Pusan National University")
+            queries.append(term + " Busan National University")
 
     if techs and apps:
         queries.append(f"{' '.join(techs[:2])} {' '.join(apps[:2])} Pusan National University")
 
     if techs:
-        queries.append(" ".join(techs[:3]))
+        queries.append(" ".join(techs[:3]) + " Pusan National University")
 
     queries = unique_keep_order(queries)
 
@@ -1181,7 +1175,9 @@ def score_paper_relevance(valid_papers: List[Dict], profile: Dict, tech_summary:
 수요기술 요약:
 {tech_summary}
 
-프로파일:
+검색 최적화 프로파일:
+- optimized_query_ko: {profile.get('optimized_query_ko', '')}
+- optimized_query_en: {profile.get('optimized_query_en', '')}
 - core_tech: {profile.get('core_tech', [])}
 - materials_or_methods: {profile.get('materials_or_methods', [])}
 - properties: {profile.get('properties', [])}
@@ -1510,7 +1506,8 @@ def score_patent_relevance(valid_patents: List[Dict], profile: Dict, tech_summar
 수요기술 요약:
 {tech_summary}
 
-프로파일:
+검색 최적화 프로파일:
+- optimized_query_ko: {profile.get('optimized_query_ko', '')}
 - core_tech: {profile.get('core_tech', [])}
 - materials_or_methods: {profile.get('materials_or_methods', [])}
 - properties: {profile.get('properties', [])}
@@ -1714,7 +1711,6 @@ def build_researcher_map(
 ) -> Dict:
     researcher_map = {}
 
-    # 논문 기반
     for i, p in enumerate(valid_papers, start=1):
         info = parsed_papers.get(str(i), {})
 
@@ -1758,7 +1754,6 @@ def build_researcher_map(
             researcher_map[key]["query_names"].append(name)
             researcher_map[key]["papers"].append(paper_obj)
 
-    # 특허 기반
     for i, p in enumerate(valid_patents, start=1):
         info = parsed_patents.get(str(i), {})
 
@@ -1803,7 +1798,6 @@ def build_researcher_map(
             researcher_map[key]["query_names"].append(name)
             researcher_map[key]["patents"].append(patent_obj)
 
-    # 중복 제거 및 정렬
     for _, data in researcher_map.items():
         data["query_names"] = unique_keep_order(data.get("query_names", []))
 
@@ -1845,9 +1839,89 @@ def build_researcher_map(
 
 
 # =========================================================
+# 결과 출력용 마크다운 생성
+# =========================================================
+def append_researcher_block(target_lines: List[str], name: str, data: Dict, is_verified: bool):
+    if is_verified:
+        target_lines.append(f"## 🏫 {data['dept']} | {name}")
+        target_lines.append("- **검증 상태:** PNU Scholar 검색 확인")
+    else:
+        target_lines.append(f"## 🟡 {data['dept']} | {name}")
+        target_lines.append("- **검증 상태:** PNU Scholar 검색 미확인 / 논문·특허 기반 후보")
+
+    if data.get("query_names"):
+        qnames = ", ".join(data.get("query_names", []))
+        if qnames and qnames != name:
+            target_lines.append(f"- **원천 데이터상 이름:** {qnames}")
+
+    if data.get("display_name"):
+        target_lines.append(f"- **PNU Scholar 표시명:** {data.get('display_name')}")
+
+    if is_verified:
+        target_lines.append(f"- **매칭 점수:** {data.get('match_score', 0)}")
+        if data.get("matched_variant"):
+            target_lines.append(f"- **매칭 이름 변형:** {data.get('matched_variant')}")
+        if data.get("search_keyword"):
+            target_lines.append(f"- **검색어:** {data.get('search_keyword')}")
+
+    target_lines.append(f"- **근거:** {data['evidence']}")
+    target_lines.append(f"- **주요 연구분야:** {data['field']}")
+
+    if data.get("link") and data.get("link") != "#":
+        target_lines.append(f"- **공식 링크:** [PNU Scholar 바로가기]({data['link']})")
+    else:
+        target_lines.append("- **공식 링크:** 자동 확인 실패")
+
+    target_lines.append("")
+
+    if data["papers"]:
+        target_lines.append("#### 📄 관련 논문")
+
+        for idx, paper in enumerate(data["papers"], start=1):
+            target_lines.append(f"{idx}. **{paper['k_title']}**")
+            target_lines.append(f"   - 원제: {paper['title']}")
+            target_lines.append(f"   - 논문 적합도: {paper.get('paper_relevance', 'Unknown')} ({paper.get('paper_score', 0)}점)")
+
+            if paper.get("paper_reason"):
+                target_lines.append(f"   - 적합성 근거: {paper['paper_reason']}")
+
+            target_lines.append(f"   - 요약: {paper['summary']} ({paper['date']}, {paper['venue']})")
+
+        target_lines.append("")
+
+    if data["patents"]:
+        target_lines.append("#### 🧾 관련 특허")
+
+        for idx, patent in enumerate(data["patents"], start=1):
+            target_lines.append(f"{idx}. **{patent['k_title']}**")
+            target_lines.append(f"   - 발명의 명칭: {patent['title']}")
+            target_lines.append(f"   - 특허 적합도: {patent.get('patent_relevance', 'Unknown')} ({patent.get('patent_score', 0)}점)")
+
+            if patent.get("patent_reason"):
+                target_lines.append(f"   - 적합성 근거: {patent['patent_reason']}")
+
+            target_lines.append(f"   - 출원번호/일자: {patent['application_number']} / {patent['application_date']}")
+
+            if patent.get("register_number") or patent.get("register_date"):
+                target_lines.append(
+                    f"   - 등록정보: "
+                    f"{patent.get('register_number', '-') or '-'} / "
+                    f"{patent.get('register_date', '-') or '-'} / "
+                    f"{patent.get('register_status', '-') or '-'}"
+                )
+
+            target_lines.append(f"   - 출원인: {', '.join(patent.get('applicant_names', [])) or PNU_IUCF_APPLICANT_KR}")
+            target_lines.append(f"   - 요약: {patent['summary']}")
+
+        target_lines.append("")
+
+    target_lines.append("---")
+
+
+# =========================================================
 # 전체 분석 파이프라인
 # =========================================================
-def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> str:
+def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> Dict:
     def report(step: int, total: int, label: str, detail: str = ""):
         if progress_callback:
             progress_callback(step, total, label, detail)
@@ -1858,29 +1932,32 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     query_text = (file_text(uploaded_file) if uploaded_file else "").strip() or (manual_text or "").strip()
 
     if len(query_text) < 5:
-        return "분석할 내용이 없습니다. 파일을 업로드하거나 내용을 입력해주세요."
+        return {
+            "main_markdown": "분석할 내용이 없습니다. 파일을 업로드하거나 내용을 입력해주세요.",
+            "unconfirmed_markdown": "",
+            "unconfirmed_count": 0,
+        }
 
     report(1, total_steps, "기본 정보 추출", "기업명과 수요기술 요약을 정리하는 중입니다.")
     request_meta = extract_request_metadata(query_text)
 
-    report(2, total_steps, "기술 프로파일 생성", "논문/특허 검색용 키워드를 만드는 중입니다.")
+    report(2, total_steps, "검색 최적화 프로파일 생성", "기술 내용을 논문·특허 검색용 키워드로 확장/정리하는 중입니다.")
     profile = extract_search_profile(query_text)
 
     if not request_meta.get("tech_summary") and profile.get("korean_summary"):
         request_meta["tech_summary"] = profile.get("korean_summary")
 
-    keywords_text = ", ".join(profile.get("search_keywords", []))
-    patent_keywords_text = ", ".join(profile.get("korean_patent_keywords", []))
-
     report(3, total_steps, "논문 검색", "OpenAlex에서 부산대 관련 논문을 수집하는 중입니다.")
+    openalex_search_terms = profile.get("openalex_queries") or profile.get("search_keywords", [])
+
     raw_papers = search_openalex(
-        tuple(profile.get("search_keywords", [])),
+        tuple(openalex_search_terms),
         tuple(profile.get("applications", [])),
         tuple(profile.get("core_tech", [])),
     )
 
     report(4, total_steps, "부산대 논문 필터링", f"수집 논문 {len(raw_papers)}건에서 부산대 저자를 식별하는 중입니다.")
-    pnu_papers, paper_authors = filter_pnu_papers(raw_papers)
+    pnu_papers, _ = filter_pnu_papers(raw_papers)
 
     report(5, total_steps, "논문 적합성 검토", f"부산대 논문 {len(pnu_papers)}건의 적합도를 평가하는 중입니다.")
     paper_relevance_map = score_paper_relevance(
@@ -1967,7 +2044,6 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         parsed_patents,
     )
 
-    # 통계
     high_count = sum(1 for p in valid_papers if p.get("paper_relevance") == "High")
     medium_count = sum(1 for p in valid_papers if p.get("paper_relevance") == "Medium")
 
@@ -1977,18 +2053,33 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     verified_count = sum(1 for _, data in researcher_map.items() if data.get("verified"))
     unverified_count = len(researcher_map) - verified_count
 
-    # 결과 생성
     lines = []
+    unconfirmed_lines = []
 
     lines.append(f"### 🏢 기업명: **{request_meta.get('company_name', '미확인')}**")
     lines.append("")
     lines.append("### 📝 수요기술 요약")
     lines.append(request_meta.get("tech_summary", "입력된 수요기술 설명을 바탕으로 연구자 매칭을 수행했습니다."))
     lines.append("")
-    lines.append(f"### 🔍 논문 분석 키워드: **{keywords_text}**")
 
+    if profile.get("optimized_query_ko") or profile.get("optimized_query_en"):
+        lines.append("### 🧭 검색 최적화 기술 프로파일")
+        if profile.get("optimized_query_ko"):
+            lines.append(f"- **검색용 정리문:** {profile.get('optimized_query_ko')}")
+        if profile.get("optimized_query_en"):
+            lines.append(f"- **English Search Profile:** {profile.get('optimized_query_en')}")
+        lines.append("")
+
+    keywords_text = ", ".join(profile.get("search_keywords", []))
+    openalex_query_text = " / ".join(profile.get("openalex_queries", []))
+    patent_keywords_text = ", ".join(profile.get("korean_patent_keywords", []))
+
+    lines.append("### 🔍 논문·특허 분석 키워드")
+    lines.append(f"- **핵심 키워드:** {keywords_text}")
+    if openalex_query_text:
+        lines.append(f"- **OpenAlex 검색식:** {openalex_query_text}")
     if kipris_enabled():
-        lines.append(f"### 🔎 특허 분석 키워드: **{patent_keywords_text}**")
+        lines.append(f"- **특허 분석 키워드:** {patent_keywords_text}")
 
     lines.append("")
     lines.append("### 📊 분석 요약")
@@ -2005,11 +2096,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     lines.append(f"- 검토 연구자 수: **{len(all_people)}명**")
     lines.append(f"- 최종 추천 후보 수: **{len(researcher_map)}명**")
     lines.append(f"- PNU Scholar 검색 확인: **{verified_count}명**")
-    lines.append(f"- 논문/특허 기반 미확인 후보: **{unverified_count}명**")
-
-    if unmatched_people:
-        lines.append(f"- 미확인 후보 일부: {', '.join(unmatched_people[:15])}")
-
+    lines.append(f"- PNU Scholar 미확인 후보: **{unverified_count}명**")
     lines.append("")
     lines.append("---")
 
@@ -2018,7 +2105,12 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         lines.append("")
         lines.append("- 논문 또는 특허 후보는 일부 확인되었으나, 최종 연구자 맵 구성에 실패했습니다.")
         lines.append("- 입력 기술 키워드가 너무 포괄적이거나, OpenAlex/KIPRIS 검색 결과가 부족할 수 있습니다.")
-        return "\n".join(lines)
+
+        return {
+            "main_markdown": "\n".join(lines),
+            "unconfirmed_markdown": "",
+            "unconfirmed_count": 0,
+        }
 
     sorted_researchers = sorted(
         researcher_map.items(),
@@ -2033,82 +2125,39 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         ),
     )
 
+    lines.append("## ✅ PNU Scholar 검색 확인 연구자")
+    lines.append("")
+
+    confirmed_output_count = 0
+    unconfirmed_output_count = 0
+
     for name, data in sorted_researchers:
-        verify_label = "PNU Scholar 검색 확인" if data.get("verified") else "논문/특허 기반 후보"
-        header_icon = "🏫" if data.get("verified") else "🟡"
+        is_verified = bool(data.get("verified"))
 
-        lines.append(f"## {header_icon} {data['dept']} | {name}")
-        lines.append(f"- **검증 상태:** {verify_label}")
-
-        if data.get("query_names"):
-            qnames = ", ".join(data.get("query_names", []))
-            if qnames and qnames != name:
-                lines.append(f"- **원천 데이터상 이름:** {qnames}")
-
-        if data.get("display_name"):
-            lines.append(f"- **PNU Scholar 표시명:** {data.get('display_name')}")
-
-        if data.get("verified"):
-            lines.append(f"- **매칭 점수:** {data.get('match_score', 0)}")
-            if data.get("matched_variant"):
-                lines.append(f"- **매칭 이름 변형:** {data.get('matched_variant')}")
-            if data.get("search_keyword"):
-                lines.append(f"- **검색어:** {data.get('search_keyword')}")
-
-        lines.append(f"- **근거:** {data['evidence']}")
-        lines.append(f"- **주요 연구분야:** {data['field']}")
-
-        if data.get("link") and data.get("link") != "#":
-            lines.append(f"- **공식 링크:** [PNU Scholar 바로가기]({data['link']})")
+        if is_verified:
+            confirmed_output_count += 1
+            append_researcher_block(lines, name, data, True)
         else:
-            lines.append("- **공식 링크:** 자동 확인 실패")
+            unconfirmed_output_count += 1
+            append_researcher_block(unconfirmed_lines, name, data, False)
 
+    if confirmed_output_count == 0:
+        lines.append("- PNU Scholar에서 자동 확인된 연구자가 없습니다.")
+        lines.append("- 아래 **연구자 미확인 건 보기**에서 논문·특허 기반 후보를 확인하세요.")
         lines.append("")
 
-        if data["papers"]:
-            lines.append("#### 📄 관련 논문")
+    if unconfirmed_output_count > 0:
+        unconfirmed_lines.insert(0, f"### 🟡 PNU Scholar 미확인 연구자 후보 {unconfirmed_output_count}명")
+        unconfirmed_lines.insert(1, "")
+        unconfirmed_lines.insert(2, "- 아래 후보는 논문 저자 또는 특허 발명자 정보에서는 확인되었으나, PNU Scholar 검색창 방식으로 자동 확인되지 않은 인원입니다.")
+        unconfirmed_lines.insert(3, "- 동명이인, 영문명 표기 차이, 한글명만 등록된 경우, Scholar 미등록 연구자일 가능성이 있습니다.")
+        unconfirmed_lines.insert(4, "")
 
-            for idx, paper in enumerate(data["papers"], start=1):
-                lines.append(f"{idx}. **{paper['k_title']}**")
-                lines.append(f"   - 원제: {paper['title']}")
-                lines.append(f"   - 논문 적합도: {paper.get('paper_relevance', 'Unknown')} ({paper.get('paper_score', 0)}점)")
-
-                if paper.get("paper_reason"):
-                    lines.append(f"   - 적합성 근거: {paper['paper_reason']}")
-
-                lines.append(f"   - 요약: {paper['summary']} ({paper['date']}, {paper['venue']})")
-
-            lines.append("")
-
-        if data["patents"]:
-            lines.append("#### 🧾 관련 특허")
-
-            for idx, patent in enumerate(data["patents"], start=1):
-                lines.append(f"{idx}. **{patent['k_title']}**")
-                lines.append(f"   - 발명의 명칭: {patent['title']}")
-                lines.append(f"   - 특허 적합도: {patent.get('patent_relevance', 'Unknown')} ({patent.get('patent_score', 0)}점)")
-
-                if patent.get("patent_reason"):
-                    lines.append(f"   - 적합성 근거: {patent['patent_reason']}")
-
-                lines.append(f"   - 출원번호/일자: {patent['application_number']} / {patent['application_date']}")
-
-                if patent.get("register_number") or patent.get("register_date"):
-                    lines.append(
-                        f"   - 등록정보: "
-                        f"{patent.get('register_number', '-') or '-'} / "
-                        f"{patent.get('register_date', '-') or '-'} / "
-                        f"{patent.get('register_status', '-') or '-'}"
-                    )
-
-                lines.append(f"   - 출원인: {', '.join(patent.get('applicant_names', [])) or PNU_IUCF_APPLICANT_KR}")
-                lines.append(f"   - 요약: {patent['summary']}")
-
-            lines.append("")
-
-        lines.append("---")
-
-    return "\n".join(lines)
+    return {
+        "main_markdown": "\n".join(lines),
+        "unconfirmed_markdown": "\n".join(unconfirmed_lines),
+        "unconfirmed_count": unconfirmed_output_count,
+    }
 
 
 # =========================================================
@@ -2132,11 +2181,11 @@ with st.sidebar:
 
 ### 매칭 방식
 
-- 기존 전체 연구자 DB 수집 방식 제거
 - 논문 저자명/특허 발명자명을 PNU Scholar 검색어로 변환
 - `/wp-json/rm/v1/scholars?sub_ks=검색어&order_by=score` 우선 조회
 - 실패 시 `/researchers/?sub_ks=검색어&order_by=score` HTML 검색 결과 보조 확인
-- 검색 확인 후보와 미확인 후보를 구분 출력
+- 검색 확인 연구자는 본문 출력
+- 검색 미확인 후보는 접힌 영역으로 분리 출력
         """
     )
 
@@ -2172,7 +2221,7 @@ uploaded_file = st.file_uploader(
 
 manual_text = st.text_area(
     "2. 또는 기술 내용 직접 입력",
-    placeholder="기술 설명, 적용 분야, 핵심 성능, 장치/공정/소재 정보를 넣으면 정확도가 올라갑니다.",
+    placeholder="기술 설명, 적용 분야, 핵심 성능, 장치/공정/소재 정보를 넣으면 검색용 키워드로 확장·정리됩니다.",
     height=240,
 )
 
@@ -2202,7 +2251,15 @@ if st.button("연구자 매칭 리스트 생성", type="primary"):
         progress_bar.progress(1.0)
         status_box.update(label="분석 완료", state="complete", expanded=False)
         step_placeholder.success("분석이 완료되었습니다. 아래 결과를 확인하세요.")
-        st.markdown(result)
+
+        st.markdown(result.get("main_markdown", ""))
+
+        unconfirmed_count = int(result.get("unconfirmed_count", 0) or 0)
+        unconfirmed_markdown = result.get("unconfirmed_markdown", "")
+
+        if unconfirmed_count > 0 and unconfirmed_markdown:
+            with st.expander(f"연구자 미확인 건 보기 ({unconfirmed_count}명)", expanded=False):
+                st.markdown(unconfirmed_markdown)
 
     except Exception as e:
         status_box.update(label="분석 중 오류 발생", state="error", expanded=True)
