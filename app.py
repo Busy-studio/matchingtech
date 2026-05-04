@@ -1842,38 +1842,63 @@ def build_researcher_map(
 # 결과 출력용 마크다운 생성
 # =========================================================
 def append_researcher_block(target_lines: List[str], name: str, data: Dict, is_verified: bool):
+    # =====================================================
+    # 1. PNU Scholar 검색 확인 연구자 출력
+    # =====================================================
     if is_verified:
-        target_lines.append(f"## 🏫 {data['dept']} | {name}")
-        target_lines.append("- **검증 상태:** PNU Scholar 검색 확인")
+        researcher_name = (
+            data.get("korean_name")
+            or data.get("name")
+            or data.get("display_name")
+            or name
+        )
+
+        department = (
+            data.get("dept")
+            or data.get("department")
+            or "PNU Scholar 검색 결과 기반 확인"
+        )
+
+        research_field = (
+            data.get("field")
+            or "PNU Scholar 검색 결과 기반 확인"
+        )
+
+        official_link = data.get("link") or "#"
+
+        target_lines.append(f"## 🏫 PNU Scholar 검색 결과 기반 확인 | {researcher_name}")
+        target_lines.append(f"- **연구자명:** {researcher_name}")
+        target_lines.append(f"- **소속(학과):** {department}")
+        target_lines.append(f"- **연구분야:** {research_field}")
+
+        if official_link and official_link != "#":
+            target_lines.append(f"- **공식링크:** [PNU Scholar 바로가기]({official_link})")
+        else:
+            target_lines.append("- **공식링크:** 자동 확인 실패")
+
+    # =====================================================
+    # 2. PNU Scholar 미확인 연구자 출력
+    # =====================================================
     else:
-        target_lines.append(f"## 🟡 {data['dept']} | {name}")
-        target_lines.append("- **검증 상태:** PNU Scholar 검색 미확인 / 논문·특허 기반 후보")
+        target_lines.append(f"## 🟡 PNU Scholar 미확인 후보 | {name}")
+        target_lines.append(f"- **연구자명:** {name}")
+        target_lines.append(f"- **소속(학과):** PNU Scholar 검색 미확인")
+        target_lines.append(f"- **연구분야:** {data.get('field', '논문·특허 기반 후보')}")
+        target_lines.append("- **공식링크:** 자동 확인 실패")
 
-    if data.get("query_names"):
-        qnames = ", ".join(data.get("query_names", []))
-        if qnames and qnames != name:
-            target_lines.append(f"- **원천 데이터상 이름:** {qnames}")
+        if data.get("query_names"):
+            qnames = ", ".join(data.get("query_names", []))
+            if qnames and qnames != name:
+                target_lines.append(f"- **원천 데이터상 이름:** {qnames}")
 
-    if data.get("display_name"):
-        target_lines.append(f"- **PNU Scholar 표시명:** {data.get('display_name')}")
-
-    if is_verified:
-        target_lines.append(f"- **매칭 점수:** {data.get('match_score', 0)}")
-        if data.get("matched_variant"):
-            target_lines.append(f"- **매칭 이름 변형:** {data.get('matched_variant')}")
-        if data.get("search_keyword"):
-            target_lines.append(f"- **검색어:** {data.get('search_keyword')}")
-
-    target_lines.append(f"- **근거:** {data['evidence']}")
-    target_lines.append(f"- **주요 연구분야:** {data['field']}")
-
-    if data.get("link") and data.get("link") != "#":
-        target_lines.append(f"- **공식 링크:** [PNU Scholar 바로가기]({data['link']})")
-    else:
-        target_lines.append("- **공식 링크:** 자동 확인 실패")
+        if data.get("evidence"):
+            target_lines.append(f"- **확인 참고:** {data.get('evidence')}")
 
     target_lines.append("")
 
+    # =====================================================
+    # 3. 관련 논문 출력
+    # =====================================================
     if data["papers"]:
         target_lines.append("#### 📄 관련 논문")
 
@@ -1889,6 +1914,9 @@ def append_researcher_block(target_lines: List[str], name: str, data: Dict, is_v
 
         target_lines.append("")
 
+    # =====================================================
+    # 4. 관련 특허 출력
+    # =====================================================
     if data["patents"]:
         target_lines.append("#### 🧾 관련 특허")
 
