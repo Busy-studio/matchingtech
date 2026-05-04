@@ -1401,6 +1401,27 @@ def is_professor_like(position: str) -> bool:
     return any(k in pos for k in ["교수", "부교수", "조교수", "석좌교수", "특임교수", "연구교수", "초빙교수", "겸임교수"])
 
 
+def is_excluded_scholar_position(position: str) -> bool:
+    """
+    PNU Scholar에 이름이 검색되더라도 학생 신분이면 연구자 매칭에서 제외합니다.
+    현재 주요 제외 대상은 API의 sinbun_name이 '대학원생'으로 내려오는 경우입니다.
+    """
+    pos = normalize_position_name(position)
+    if not pos:
+        return False
+
+    excluded_keywords = [
+        "대학원생",
+        "학부생",
+        "석사과정",
+        "박사과정",
+        "석박사",
+        "통합과정",
+    ]
+
+    return any(k in pos for k in excluded_keywords)
+
+
 def score_department_context_relevance(result: Dict, context_text: str) -> int:
     """
     동명이인 후보가 있을 때 학과/전공과 논문·특허 제목/요약 맥락의 연관성을 점수화합니다.
@@ -1572,6 +1593,10 @@ def choose_best_scholar_candidate(author_name: str, candidates: List[Dict], cont
     for r in candidates:
         ok, strict_score, strict_variant = is_strict_name_match(author_name, r, 0.99 if has_korean(author_name) else 0.78)
         if ok:
+            # 이름이 일치하더라도 대학원생/학생 신분이면 검증 매칭에서 제외
+            if is_excluded_scholar_position(r.get("position", "")):
+                continue
+
             r = dict(r)
             r["_strict_score"] = strict_score
             r["_strict_variant"] = strict_variant
@@ -1592,6 +1617,10 @@ def choose_best_scholar_candidate(author_name: str, candidates: List[Dict], cont
 
     best = ranked[0]
     second = ranked[1] if len(ranked) > 1 else None
+
+    # 최종 후보가 대학원생/학생 신분이면 확인 후보로 올리지 않음
+    if is_excluded_scholar_position(best.get("position", "")):
+        return None
 
     # 특허 단독 + 공동출원 + 교수계열 아님이면 확인 후보로 올리지 않음
     source_types = set(context_info.get("source_types", []) or [])
@@ -1635,6 +1664,9 @@ def match_author_to_pnu_scholar(author_name: str, context_info: Optional[Dict] =
 
     best = choose_best_scholar_candidate(name, all_results, context_info)
     if not best:
+        return None
+
+    if is_excluded_scholar_position(best.get("position", "")):
         return None
 
     if has_korean(name):
