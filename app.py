@@ -459,13 +459,14 @@ def extract_search_profile(query_text: str) -> Dict:
 입력문을 그대로 검색하지 말고, 논문·특허 검색에 적합하도록 기술 개념을 정규화하고 확장하세요.
 
 목표:
+- 입력문을 표면적인 단어로만 나열하지 말고, 수요자가 실제로 도입·개발하려는 적용기술을 해석해 검색어로 변환
 - PNU Scholar 논문 검색에서 부산대학교 연구자 논문이 잘 검색되도록 한글+영어 검색어를 함께 구성
 - PNU Scholar는 KCI/국문 논문도 포함하므로 국문 기술 키워드를 충분히 포함
 - OpenAlex는 PNU Scholar에서 논문 후보가 부족할 때 쓰는 보조 검색이므로 영어 검색어를 별도로 구성
 - KIPRIS 특허 검색에서 부산대학교/부산대학교 산학협력단 특허가 잘 검색되도록 한국어 검색어를 구성
-- 너무 넓은 일반어는 줄이고, 장치·소재·공정·알고리즘·성능·적용분야 중심으로 구체화
+- 단순 산업·업무 도메인명보다 실제 구현 기술, 분석 방법, 알고리즘, 데이터 처리 방식, 예측/최적화 대상, 의사결정 기능을 우선
 - 기업명, 사업명, 지역명, 불필요한 행정 문구는 검색 키워드에서 제외
-- 기술이 너무 포괄적이면 세부기술 후보를 2~4개로 나누어 검색 가능하게 구성
+- 기술이 너무 포괄적이면 세부 적용기술 후보를 2~4개로 나누어 검색 가능하게 구성
 
 반드시 JSON만 출력하세요.
 
@@ -473,11 +474,13 @@ def extract_search_profile(query_text: str) -> Dict:
 {{
   "optimized_query_ko": "입력 기술을 검색 친화적으로 정리한 한국어 설명 2~3문장",
   "optimized_query_en": "Search-optimized English technical description in 2-3 sentences",
-  "core_tech": ["핵심 기술 영어 2~5개"],
+  "core_tech": ["실제 적용되는 핵심 기술 영어 2~5개"],
   "materials_or_methods": ["소재/방법/공정/알고리즘 영어 2~6개"],
   "properties": ["성능/특성 영어 2~5개"],
-  "applications": ["적용처 영어 1~4개"],
-  "search_keywords": ["PNU Scholar 및 OpenAlex용 짧은 영어 키워드 6~10개"],
+  "applications": ["적용처/업무 도메인 영어 1~4개"],
+  "applied_tech_keywords_ko": ["실제 적용기술 중심 한글 논문 검색어 8~14개"],
+  "applied_tech_keywords_en": ["실제 적용기술 중심 영어 논문 검색어 6~10개"],
+  "search_keywords": ["PNU Scholar 및 OpenAlex용 짧은 영어 기술 키워드 6~10개"],
   "openalex_queries": [
     "핵심기술 + 적용처 + Pusan National University",
     "소재/방법 + 성능 + Pusan National University",
@@ -492,12 +495,18 @@ def extract_search_profile(query_text: str) -> Dict:
 - openalex_queries는 실제 검색창에 넣을 수 있는 짧은 영어 구문으로 작성
 - 각 openalex_queries에는 가능하면 Pusan National University 또는 Busan National University를 포함
 - search_keywords는 1~4단어 이내의 짧은 영어 기술명 중심
+- applied_tech_keywords_ko/en은 PNU Scholar 논문 검색용 핵심 필드이며, 사용자가 적은 문구를 그대로 반복하지 말고 실제 적용기술 중심으로 작성
 - korean_patent_keywords는 특허 검색뿐 아니라 PNU Scholar 국문 논문 검색에도 사용할 수 있도록 명사형 중심으로 작성
-- PNU Scholar 논문 검색은 KCI/국문 논문도 포함하므로 korean_patent_keywords에는 국문 논문 검색에 적합한 한글 기술 키워드도 포함
+- PNU Scholar 논문 검색은 KCI/국문 논문도 포함하므로 한글 기술 키워드를 충분히 포함
 - 영어 약어가 일반적으로 쓰이는 기술은 한글명과 영어 약어를 모두 포함
 - 한글명, 영어명, 약어, 풀네임을 모두 고려
 - 의료·바이오·로봇·AI·소재·반도체 등 분야별 전문용어를 적극 반영
 - 단, 입력문에 없는 기술을 과도하게 창작하지 말 것
+
+검색어 품질 기준:
+- 좋은 검색어: "입찰 가격 예측", "수요예측", "의사결정지원", "최적화 알고리즘", "이상탐지", "텍스트 마이닝", "자연어처리", "추천시스템", "강화학습", "예측모델", "데이터마이닝"처럼 실제 논문 제목·초록에 등장할 법한 기술어
+- 나쁜 검색어: "물품 조달", "용역 조달", "공공조달 입찰", "MRO 조달", "전자조달 시스템"처럼 업무 도메인만 넓게 지칭하는 표현. 이런 표현은 applications 또는 특허 키워드에는 둘 수 있으나 PNU Scholar 논문 핵심 검색어로 과도하게 넣지 말 것
+- 예: 입력이 '입찰/조달 빅데이터 기반 최적화'라면 검색어는 '입찰 최적화'에만 머물지 말고 '입찰가격 예측, 조달 데이터마이닝, 수요예측, 공급업체 추천, 의사결정지원, 이상탐지, 자연어처리 기반 제안서 분석, 최적화 알고리즘, 머신러닝 예측모델'처럼 실제 적용기술 중심으로 확장
 
 입력문:
 {compact_text(query_text, 7000)}
@@ -511,6 +520,8 @@ def extract_search_profile(query_text: str) -> Dict:
             "materials_or_methods",
             "properties",
             "applications",
+            "applied_tech_keywords_ko",
+            "applied_tech_keywords_en",
             "search_keywords",
             "openalex_queries",
             "korean_patent_keywords",
@@ -542,6 +553,8 @@ def extract_search_profile(query_text: str) -> Dict:
         "materials_or_methods": fallback[3:6],
         "properties": [],
         "applications": [],
+        "applied_tech_keywords_ko": [],
+        "applied_tech_keywords_en": [],
         "search_keywords": fallback,
         "openalex_queries": [
             " ".join(fallback[:3]) + " Pusan National University",
@@ -1928,23 +1941,30 @@ def build_pnu_publication_queries(profile: Dict) -> List[str]:
     """
     PNU Scholar publications API 검색용 키워드를 구성합니다.
 
-    PNU Scholar는 SCIE/Scopus뿐 아니라 KCI·국문 논문도 함께 검색되므로
-    영어 키워드만 쓰지 않고 한글 키워드, 영어 키워드, 한영 조합 키워드를 혼용합니다.
-    단, 콤마로 많은 키워드가 한 번에 붙은 긴 검색식은 0건이 되기 쉬워 제외합니다.
+    원칙:
+    - 사용자가 입력한 문구를 그대로 검색어로 반복하지 않고, 실제 적용기술 중심으로 검색어를 구성합니다.
+    - PNU Scholar는 SCIE/Scopus/KCI·국문 논문을 함께 검색하므로 한글+영문을 병행합니다.
+    - 업무 도메인명은 보조적으로만 사용하고, 논문 검색은 알고리즘·분석기법·예측/최적화 기능 중심으로 우선 검색합니다.
     """
     queries = []
 
-    # 1. KCI/국문 논문 검색을 위해 한글 기술 키워드 우선 포함
-    queries.extend(profile.get("korean_patent_keywords", [])[:10])
+    # 1. Gemini가 해석한 실제 적용기술 검색어를 최우선 사용
+    queries.extend(profile.get("applied_tech_keywords_ko", [])[:12])
+    queries.extend(profile.get("applied_tech_keywords_en", [])[:8])
 
-    # 2. 영문 논문 검색용 짧은 키워드 포함
+    # 2. 한글 특허/기술 키워드는 보조적으로 포함하되, 너무 도메인명에 치우치지 않게 후순위 배치
+    queries.extend(profile.get("korean_patent_keywords", [])[:8])
+
+    # 3. 영문 논문 검색용 짧은 기술 키워드 포함
     queries.extend(profile.get("search_keywords", [])[:8])
     queries.extend(profile.get("core_tech", [])[:5])
     queries.extend(profile.get("materials_or_methods", [])[:5])
     queries.extend(profile.get("properties", [])[:4])
-    queries.extend(profile.get("applications", [])[:4])
 
-    # 3. 한국어 정리문에서 국문 기술 명사 후보 일부 추출
+    # 4. 적용처/업무 도메인은 너무 넓어질 수 있으므로 소량만 보조 검색
+    queries.extend(profile.get("applications", [])[:2])
+
+    # 5. 한국어 정리문에서 기술 명사 후보 일부 추출
     ko_text = normalize_space(
         profile.get("optimized_query_ko", "")
         or profile.get("korean_summary", "")
@@ -1957,6 +1977,7 @@ def build_pnu_publication_queries(profile: Dict) -> List[str]:
             "및", "또는", "관련", "지원", "수요", "분야", "시스템",
             "플랫폼", "서비스", "고도화", "분석", "구축", "연계",
             "방안", "방법", "장치", "모델", "데이터", "정보", "관리",
+            "기업", "사업", "제품", "시장", "공공", "민간",
         }
 
         for term in rough_terms:
@@ -1970,10 +1991,9 @@ def build_pnu_publication_queries(profile: Dict) -> List[str]:
             if has_korean(term):
                 queries.append(term)
 
-    # 4. 한영 조합 검색 일부 추가
-    #    예: 입찰 최적화 Bid optimization / 피부 재생 skin regeneration
-    ko_keywords = [normalize_space(q) for q in profile.get("korean_patent_keywords", []) if normalize_space(q)]
-    en_keywords = [normalize_space(q) for q in profile.get("search_keywords", []) if normalize_space(q)]
+    # 6. 한영 조합 검색 일부 추가
+    ko_keywords = [normalize_space(q) for q in (profile.get("applied_tech_keywords_ko") or profile.get("korean_patent_keywords", [])) if normalize_space(q)]
+    en_keywords = [normalize_space(q) for q in (profile.get("applied_tech_keywords_en") or profile.get("search_keywords", [])) if normalize_space(q)]
 
     for ko in ko_keywords[:3]:
         for en in en_keywords[:2]:
@@ -1981,7 +2001,7 @@ def build_pnu_publication_queries(profile: Dict) -> List[str]:
             if len(combo) <= 80:
                 queries.append(combo)
 
-    # 5. PNU Scholar 검색에 부적합한 긴 검색어/일반어 제거
+    # 7. PNU Scholar 검색에 부적합한 긴 검색어/일반어/도메인 과잉어 제거
     cleaned = []
     blocked_en = {
         "pnu",
@@ -1996,21 +2016,38 @@ def build_pnu_publication_queries(profile: Dict) -> List[str]:
         "data",
     }
 
+    # 업무 도메인만 가리키는 넓은 표현은 논문 검색어 상위 노출에서 제외
+    # 단, 같은 의미라도 '예측', '최적화', '추천', '분류', '탐지', '마이닝', '알고리즘' 등이 붙으면 기술어로 보고 허용
+    weak_domain_terms = {
+        "물품 조달", "용역 조달", "MRO 조달", "공공조달 입찰", "전자조달 시스템",
+        "조달 계약", "정부 계약", "입찰 전략 수립", "데이터 기반 의사결정",
+        "public procurement", "government contracts", "tender management", "e-procurement",
+    }
+    technical_markers = [
+        "예측", "최적화", "추천", "분류", "탐지", "마이닝", "알고리즘", "모델링",
+        "기계학습", "머신러닝", "딥러닝", "강화학습", "자연어처리", "텍스트",
+        "prediction", "optimization", "recommendation", "classification", "detection",
+        "mining", "algorithm", "machine learning", "deep learning", "reinforcement learning", "nlp",
+    ]
+
     for q in queries:
         q = normalize_space(q)
         if not q:
             continue
 
-        # 너무 긴 문장형 검색어 제거
         if len(q) > 80:
             continue
 
-        # 콤마로 여러 키워드가 붙은 검색어 제거
         if q.count(",") >= 2:
             continue
 
-        if q.lower() in blocked_en:
+        q_lower = q.lower()
+        if q_lower in blocked_en:
             continue
+
+        if q in weak_domain_terms or q_lower in weak_domain_terms:
+            if not any(marker.lower() in q_lower for marker in technical_markers):
+                continue
 
         cleaned.append(q)
 
@@ -3285,12 +3322,20 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
             lines.append(f"- **English Search Profile:** {profile.get('optimized_query_en')}")
         lines.append("")
 
+    applied_keywords_text = ", ".join(
+        unique_keep_order(
+            (profile.get("applied_tech_keywords_ko", []) or [])
+            + (profile.get("applied_tech_keywords_en", []) or [])
+        )
+    )
     keywords_text = ", ".join(profile.get("search_keywords", []))
     pnu_publication_query_text = " / ".join(pnu_publication_queries)
     openalex_query_text = " / ".join(profile.get("openalex_queries", []))
     patent_keywords_text = ", ".join(profile.get("korean_patent_keywords", []))
 
     lines.append("### 🔍 논문·특허 분석 키워드")
+    if applied_keywords_text:
+        lines.append(f"- **실제 적용기술 키워드:** {applied_keywords_text}")
     lines.append(f"- **핵심 키워드:** {keywords_text}")
     if pnu_publication_query_text:
         lines.append(f"- **PNU Scholar 논문 검색어:** {pnu_publication_query_text}")
