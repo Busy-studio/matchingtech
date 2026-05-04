@@ -23,7 +23,7 @@ except Exception:
 # 기본 설정
 # =========================================================
 st.set_page_config(
-    page_title="부산대 수요기술-연구자 증거형 매칭 시스템",
+    page_title="부산대 수요기술-연구자 매칭 시스템",
     layout="wide",
 )
 
@@ -3427,10 +3427,10 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 # =========================================================
 # Streamlit UI
 # =========================================================
-st.title("🎓 PNU 수요기술-연구자 증거형 매칭 시스템")
+st.title("🎓 PNU 수요기술-연구자 매칭 시스템")
 st.caption(
     "수요기술에 맞는 부산대 논문 저자와 특허 발명자를 찾고, "
-    "PNU Scholar 연구자 검색창 방식으로 실제 검색 결과를 확인합니다."
+    "수요기술과 적합한 PNU 연구자를 매칭합니다."
 )
 
 debug_name = st.sidebar.text_input(
