@@ -849,7 +849,7 @@ def fetch_pnu_profile_html(profile_link: str) -> str:
     return ""
 
 
-def extract_keyword_cloud_terms_from_html(html_text: str, max_terms: int = 12) -> List[str]:
+def extract_keyword_cloud_terms_from_html(html_text: str, max_terms: int = 5) -> List[str]:
     if not html_text:
         return []
 
@@ -1164,6 +1164,7 @@ def get_korean_keyword_cloud_from_profile(profile_link: str, researcher_id: str 
     """
     연구자 상세페이지 번호가 있으면 Keyword Cloud API를 먼저 호출하고,
     실패할 경우 기존 HTML 파싱 방식으로 보조 추출합니다.
+    단, 번역 비용과 속도를 줄이기 위해 상위 5개 키워드만 번역합니다.
     """
     profile_link = normalize_space(profile_link)
     researcher_id = normalize_space(researcher_id)
@@ -1184,13 +1185,16 @@ def get_korean_keyword_cloud_from_profile(profile_link: str, researcher_id: str 
     if not keywords:
         return "Keyword Cloud 자동 추출 실패"
 
+    # 핵심 수정: 상위 5개만 번역 요청
+    keywords = unique_keep_order(keywords)[:5]
+
     translated = translate_keyword_cloud_to_korean_cached(tuple(keywords))
     translated = unique_keep_order(translated)
 
     if not translated:
         return "Keyword Cloud 자동 추출 실패"
 
-    return ", ".join(translated[:10])
+    return ", ".join(translated[:5])
 
 
 def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Optional[Dict]:
