@@ -34,6 +34,7 @@ PNU_SCHOLAR_SEARCH_PAGE = "https://scholar.pusan.ac.kr/researchers/"
 PNU_SCHOLAR_DETAIL_API_URL = "https://scholar.pusan.ac.kr/wp-json/rm/v1/scholar"
 PNU_SCHOLAR_DEPARTMENTS_API_URL = "https://scholar.pusan.ac.kr/wp-json/rm/v1/departments"
 PNU_SCHOLAR_DEPARTMENT_DETAIL_API_URL = "https://scholar.pusan.ac.kr/wp-json/rm/v1/department"
+PNU_SCHOLAR_PUBLICATIONS_API_URL = "https://scholar.pusan.ac.kr/wp-json/rm/v1/publications"
 
 KIPRIS_BASE_URL = "https://plus.kipris.or.kr/kipo-api/kipi/patUtiModInfoSearchSevice"
 
@@ -458,7 +459,9 @@ def extract_search_profile(query_text: str) -> Dict:
 입력문을 그대로 검색하지 말고, 논문·특허 검색에 적합하도록 기술 개념을 정규화하고 확장하세요.
 
 목표:
-- OpenAlex 논문 검색에서 부산대학교 연구자 논문이 잘 검색되도록 영어 검색어를 구성
+- PNU Scholar 논문 검색에서 부산대학교 연구자 논문이 잘 검색되도록 한글+영어 검색어를 함께 구성
+- PNU Scholar는 KCI/국문 논문도 포함하므로 국문 기술 키워드를 충분히 포함
+- OpenAlex는 PNU Scholar에서 논문 후보가 부족할 때 쓰는 보조 검색이므로 영어 검색어를 별도로 구성
 - KIPRIS 특허 검색에서 부산대학교/부산대학교 산학협력단 특허가 잘 검색되도록 한국어 검색어를 구성
 - 너무 넓은 일반어는 줄이고, 장치·소재·공정·알고리즘·성능·적용분야 중심으로 구체화
 - 기업명, 사업명, 지역명, 불필요한 행정 문구는 검색 키워드에서 제외
@@ -474,13 +477,13 @@ def extract_search_profile(query_text: str) -> Dict:
   "materials_or_methods": ["소재/방법/공정/알고리즘 영어 2~6개"],
   "properties": ["성능/특성 영어 2~5개"],
   "applications": ["적용처 영어 1~4개"],
-  "search_keywords": ["OpenAlex용 짧은 영어 키워드 6~10개"],
+  "search_keywords": ["PNU Scholar 및 OpenAlex용 짧은 영어 키워드 6~10개"],
   "openalex_queries": [
     "핵심기술 + 적용처 + Pusan National University",
     "소재/방법 + 성능 + Pusan National University",
     "핵심기술 동의어 + Busan National University"
   ],
-  "korean_patent_keywords": ["KIPRIS 특허 검색용 한국어 키워드 6~12개"],
+  "korean_patent_keywords": ["PNU Scholar 국문 논문 및 KIPRIS 특허 검색용 한국어 키워드 8~14개"],
   "exclude_keywords": ["배제 키워드 영어 0~5개"],
   "korean_summary": "수요기술 요약 1~2문장"
 }}
@@ -488,9 +491,11 @@ def extract_search_profile(query_text: str) -> Dict:
 검색어 작성 규칙:
 - openalex_queries는 실제 검색창에 넣을 수 있는 짧은 영어 구문으로 작성
 - 각 openalex_queries에는 가능하면 Pusan National University 또는 Busan National University를 포함
-- search_keywords는 1~4단어 이내의 짧은 기술명 중심
-- korean_patent_keywords는 명사형 중심으로 작성
-- 약어가 있으면 풀네임과 약어를 모두 고려
+- search_keywords는 1~4단어 이내의 짧은 영어 기술명 중심
+- korean_patent_keywords는 특허 검색뿐 아니라 PNU Scholar 국문 논문 검색에도 사용할 수 있도록 명사형 중심으로 작성
+- PNU Scholar 논문 검색은 KCI/국문 논문도 포함하므로 korean_patent_keywords에는 국문 논문 검색에 적합한 한글 기술 키워드도 포함
+- 영어 약어가 일반적으로 쓰이는 기술은 한글명과 영어 약어를 모두 포함
+- 한글명, 영어명, 약어, 풀네임을 모두 고려
 - 의료·바이오·로봇·AI·소재·반도체 등 분야별 전문용어를 적극 반영
 - 단, 입력문에 없는 기술을 과도하게 창작하지 말 것
 
@@ -1367,7 +1372,9 @@ DEPARTMENT_CONTEXT_KEYWORDS = {
         "최적화", "공급망", "제조", "빅데이터", "장비", "공정", "스마트팩토리", "금형",
     ],
     "데이터사이언스": ["data", "machine learning", "deep learning", "ai", "prediction", "analytics", "데이터", "기계학습", "인공지능", "예측"],
-    "컴퓨터": ["software", "algorithm", "network", "security", "computer", "ai", "iot", "소프트웨어", "알고리즘", "네트워크", "보안"],
+    "정보컴퓨터": ["software", "algorithm", "network", "wireless", "wlan", "wifi", "lan", "security", "computer", "ai", "iot", "big data", "deep learning", "reinforcement learning", "optimization", "ap", "access point", "소프트웨어", "알고리즘", "네트워크", "무선랜", "와이파이", "보안", "인공지능", "빅데이터", "심층신경망", "강화학습", "최적화", "액세스포인트"],
+    "컴퓨터": ["software", "algorithm", "network", "wireless", "wlan", "wifi", "lan", "security", "computer", "ai", "iot", "big data", "deep learning", "reinforcement learning", "optimization", "ap", "access point", "소프트웨어", "알고리즘", "네트워크", "무선랜", "와이파이", "보안", "인공지능", "빅데이터", "심층신경망", "강화학습", "최적화", "액세스포인트"],
+    "통신": ["network", "wireless", "wlan", "wifi", "lan", "ap", "access point", "communication", "routing", "traffic", "무선랜", "와이파이", "네트워크", "통신", "트래픽", "라우팅", "액세스포인트"],
     "의학": ["medical", "skin", "dermal", "wound", "regeneration", "pdrn", "cell", "clinical", "의료", "피부", "상처", "재생", "세포", "임상"],
     "의생명": ["biomaterial", "bio", "cell", "tissue", "regeneration", "collagen", "ecm", "바이오", "생체", "세포", "조직", "재생", "콜라겐"],
     "생명": ["bio", "cell", "protein", "gene", "metabolism", "바이오", "세포", "단백질", "유전자", "대사"],
@@ -1421,6 +1428,65 @@ def is_excluded_scholar_position(position: str) -> bool:
 
     return any(k in pos for k in excluded_keywords)
 
+def is_exact_scholar_name_match(query_name: str, result: Dict) -> bool:
+    """
+    입력 이름과 PNU Scholar 응답의 실제 이름이 완전 일치하는지 확인합니다.
+    search_keyword가 아니라 display/korean/official/english 등 실제 응답 필드만 사용합니다.
+    """
+    q = normalize_name_for_match(query_name)
+    if not q:
+        return False
+
+    candidate_names = unique_keep_order(
+        [
+            result.get("display_name", ""),
+            result.get("korean_name", ""),
+            result.get("official_name", ""),
+            result.get("english_name", ""),
+        ]
+        + [n for n in (result.get("all_names", []) or []) if normalize_space(n)]
+    )
+
+    for candidate in candidate_names:
+        n = normalize_name_for_match(candidate)
+        if n and n == q:
+            return True
+
+    return False
+
+
+def pick_unique_exact_non_student_candidate(query_name: str, results: List[Dict]) -> Optional[Dict]:
+    """
+    PNU Scholar 검색 결과 중 입력 이름과 완전 일치하는 후보가 1명뿐이고,
+    그 후보가 대학원생/학부생 계열이 아니면 동명이인/학과맥락 판별 전에 바로 확정합니다.
+
+    예: 김종덕처럼 PNU Scholar 검색 결과가 단일 교수 후보인 경우,
+    특허·논문 맥락 점수가 약해도 false negative로 미확인 처리하지 않습니다.
+    """
+    exact_candidates = []
+
+    for r in results or []:
+        if not is_exact_scholar_name_match(query_name, r):
+            continue
+
+        position = normalize_space(
+            r.get("position")
+            or r.get("sinbun_name")
+            or ((r.get("scholar_detail") or {}).get("sinbun_name"))
+            or ""
+        )
+
+        if is_excluded_scholar_position(position):
+            continue
+
+        exact_candidates.append(r)
+
+    if len(exact_candidates) == 1:
+        return exact_candidates[0]
+
+    return None
+
+
 
 def score_department_context_relevance(result: Dict, context_text: str) -> int:
     """
@@ -1455,6 +1521,21 @@ def score_department_context_relevance(result: Dict, context_text: str) -> int:
     dept_name = normalize_space(result.get("dept_name", ""))
     if dept_name and dept_name in context_text:
         score += 25
+
+    # 정보컴퓨터/통신 분야는 특허 문장에 학과명이 직접 나오지 않아도
+    # 빅데이터·무선랜·강화학습·AI·최적화 키워드가 같이 나오면 명확한 가점 부여
+    if any(x in dept_blob for x in ["정보컴퓨터", "컴퓨터", "통신", "전기전자"]):
+        ict_hits = sum(
+            1
+            for kw in [
+                "빅데이터", "무선랜", "와이파이", "네트워크", "인공지능", "심층신경망",
+                "강화학습", "최적화", "AP", "액세스포인트", "big data", "wlan",
+                "wireless", "network", "deep learning", "reinforcement learning", "optimization",
+            ]
+            if kw.lower() in ctx
+        )
+        if ict_hits:
+            score += min(35, 10 + ict_hits * 5)
 
     # 관련성 낮은 일반 센터/대학원 협동과정은 맥락점수가 없으면 약한 감점
     if any(x in dept_blob for x in ["센터", "협동과정", "국제교육", "교육개발"]):
@@ -1561,21 +1642,30 @@ def rank_scholar_candidate(author_name: str, result: Dict, context_info: Optiona
     source_types = set(context_info.get("source_types", []) or [])
     patent_only = source_types == {"patent"}
     joint_patent = bool(context_info.get("joint_patent"))
+    pnu_only_patent = bool(context_info.get("pnu_only_patent"))
 
-    # 특허 발명자만으로 검증되는 경우는 동명이인 위험이 높으므로 보수적으로 처리
+    # 특허 발명자만으로 검증되는 경우는 동명이인 위험이 높으므로 보수적으로 처리하되,
+    # 출원인이 부산대학교/부산대학교 산학협력단 단독 계열이고 교수 신분이면 신뢰도를 보강합니다.
     conservative_penalty = 0
+    trust_bonus = 0
     if patent_only and joint_patent:
         conservative_penalty -= 12
         if not is_professor_like(position):
             conservative_penalty -= 25
 
-    total = (name_score * 100) + position_score + dept_score + completeness_score + conservative_penalty
+    if patent_only and pnu_only_patent and is_professor_like(position):
+        trust_bonus += 14
+        if dept_score > 0:
+            trust_bonus += 8
+
+    total = (name_score * 100) + position_score + dept_score + completeness_score + trust_bonus + conservative_penalty
 
     debug = {
         "name_score": round(name_score, 3),
         "position_score": position_score,
         "dept_context_score": dept_score,
         "completeness_score": completeness_score,
+        "trust_bonus": trust_bonus,
         "conservative_penalty": conservative_penalty,
         "position": position,
     }
@@ -1631,9 +1721,23 @@ def choose_best_scholar_candidate(author_name: str, candidates: List[Dict], cont
     if second and (best.get("_rank_score", 0) - second.get("_rank_score", 0) < 8):
         best_prof = is_professor_like(best.get("position", ""))
         second_prof = is_professor_like(second.get("position", ""))
-        # 교수계열 우선순위 또는 맥락점수 차이가 명확하지 않으면 보류
-        if best_prof == second_prof and abs(best.get("_rank_debug", {}).get("dept_context_score", 0) - second.get("_rank_debug", {}).get("dept_context_score", 0)) < 8:
-            return None
+        best_dept_ctx = best.get("_rank_debug", {}).get("dept_context_score", 0)
+        second_dept_ctx = second.get("_rank_debug", {}).get("dept_context_score", 0)
+        source_types = set(context_info.get("source_types", []) or [])
+        patent_only = source_types == {"patent"}
+        pnu_only_patent = bool(context_info.get("pnu_only_patent"))
+
+        # 부산대 단독계열 특허 + 교수 신분 + 학과 맥락점수가 명확하면 동명이인 보류를 해제
+        strong_context_for_best = (
+            best_prof
+            and best_dept_ctx >= 18
+            and (best_dept_ctx - second_dept_ctx >= 8 or (patent_only and pnu_only_patent))
+        )
+
+        if not strong_context_for_best:
+            # 교수계열 우선순위 또는 맥락점수 차이가 명확하지 않으면 보류
+            if best_prof == second_prof and abs(best_dept_ctx - second_dept_ctx) < 8:
+                return None
 
     return best
 
@@ -1661,6 +1765,40 @@ def match_author_to_pnu_scholar(author_name: str, context_info: Optional[Dict] =
 
     if not all_results:
         return None
+
+    # =====================================================
+    # 단일 완전일치 후보 우선 확정
+    # - PNU Scholar에서 이름 완전일치 후보가 1명뿐이면
+    #   동명이인/학과맥락/특허맥락 판단 전에 바로 확정
+    # - 단, 대학원생/학부생 계열은 제외
+    # =====================================================
+    unique_exact = pick_unique_exact_non_student_candidate(name, all_results)
+    if unique_exact:
+        used_query = unique_exact.get("used_query") or unique_exact.get("search_keyword") or search_queries[0]
+        matched_variant = (
+            unique_exact.get("korean_name")
+            or unique_exact.get("official_name")
+            or unique_exact.get("display_name")
+            or name
+        )
+
+        unique_exact["verified"] = True
+        unique_exact["match_score"] = 1.0
+        unique_exact["matched_variant"] = matched_variant
+        unique_exact["query_name"] = name
+        unique_exact["search_keyword"] = used_query
+        unique_exact["rank_score"] = 999.0
+        unique_exact["rank_debug"] = {
+            "name_score": 1.0,
+            "position": unique_exact.get("position", ""),
+            "selection": "unique_exact_non_student",
+        }
+        unique_exact["selection_reason"] = "PNU Scholar 단일 완전일치 후보로 확인되어 동명이인 판별 없이 확정"
+        unique_exact["evidence"] = (
+            f"PNU Scholar 연구자 검색에서 '{used_query}' 검색 결과 단일 완전일치 후보 확인: "
+            f"{unique_exact.get('display_name') or unique_exact.get('official_name')}"
+        )
+        return unique_exact
 
     best = choose_best_scholar_candidate(name, all_results, context_info)
     if not best:
@@ -1763,6 +1901,299 @@ def match_people_to_pnu_scholar_parallel(
         time.sleep(0.05)
 
     return scholar_matches, retry_unmatched
+
+
+# =========================================================
+# PNU Scholar 논문 검색 API 기반 논문 수집
+# =========================================================
+def is_allowed_pnu_publication_professor(author: Dict) -> bool:
+    """
+    PNU Scholar publications API의 scholar[] 저자 중 교수 계열만 채택합니다.
+    대학원생/학부생/연구원/기타교수는 제외합니다.
+    """
+    sinbun_code = normalize_space(author.get("sinbun_code", "")).lower()
+    sinbun_name = normalize_space(author.get("sinbun_name", ""))
+
+    if sinbun_name in {"교수", "부교수", "조교수"}:
+        return True
+
+    # sinbun_name이 비어 있지만 코드가 professor인 예외를 허용
+    if sinbun_code == "professor" and not sinbun_name:
+        return True
+
+    return False
+
+
+def build_pnu_publication_queries(profile: Dict) -> List[str]:
+    """
+    PNU Scholar publications API 검색용 키워드를 구성합니다.
+
+    PNU Scholar는 SCIE/Scopus뿐 아니라 KCI·국문 논문도 함께 검색되므로
+    영어 키워드만 쓰지 않고 한글 키워드, 영어 키워드, 한영 조합 키워드를 혼용합니다.
+    단, 콤마로 많은 키워드가 한 번에 붙은 긴 검색식은 0건이 되기 쉬워 제외합니다.
+    """
+    queries = []
+
+    # 1. KCI/국문 논문 검색을 위해 한글 기술 키워드 우선 포함
+    queries.extend(profile.get("korean_patent_keywords", [])[:10])
+
+    # 2. 영문 논문 검색용 짧은 키워드 포함
+    queries.extend(profile.get("search_keywords", [])[:8])
+    queries.extend(profile.get("core_tech", [])[:5])
+    queries.extend(profile.get("materials_or_methods", [])[:5])
+    queries.extend(profile.get("properties", [])[:4])
+    queries.extend(profile.get("applications", [])[:4])
+
+    # 3. 한국어 정리문에서 국문 기술 명사 후보 일부 추출
+    ko_text = normalize_space(
+        profile.get("optimized_query_ko", "")
+        or profile.get("korean_summary", "")
+    )
+
+    if ko_text:
+        rough_terms = re.split(r"[\s,·/()\[\]{}]+", ko_text)
+        blocked = {
+            "기술", "개발", "활용", "기반", "적용", "위한", "통한",
+            "및", "또는", "관련", "지원", "수요", "분야", "시스템",
+            "플랫폼", "서비스", "고도화", "분석", "구축", "연계",
+            "방안", "방법", "장치", "모델", "데이터", "정보", "관리",
+        }
+
+        for term in rough_terms:
+            term = normalize_space(term).strip(".,;:·")
+            if len(term) < 2:
+                continue
+            if term in blocked:
+                continue
+            if re.fullmatch(r"[0-9]+", term):
+                continue
+            if has_korean(term):
+                queries.append(term)
+
+    # 4. 한영 조합 검색 일부 추가
+    #    예: 입찰 최적화 Bid optimization / 피부 재생 skin regeneration
+    ko_keywords = [normalize_space(q) for q in profile.get("korean_patent_keywords", []) if normalize_space(q)]
+    en_keywords = [normalize_space(q) for q in profile.get("search_keywords", []) if normalize_space(q)]
+
+    for ko in ko_keywords[:3]:
+        for en in en_keywords[:2]:
+            combo = f"{ko} {en}"
+            if len(combo) <= 80:
+                queries.append(combo)
+
+    # 5. PNU Scholar 검색에 부적합한 긴 검색어/일반어 제거
+    cleaned = []
+    blocked_en = {
+        "pnu",
+        "pusan national university",
+        "busan national university",
+        "technology",
+        "system",
+        "method",
+        "analysis",
+        "development",
+        "model",
+        "data",
+    }
+
+    for q in queries:
+        q = normalize_space(q)
+        if not q:
+            continue
+
+        # 너무 긴 문장형 검색어 제거
+        if len(q) > 80:
+            continue
+
+        # 콤마로 여러 키워드가 붙은 검색어 제거
+        if q.count(",") >= 2:
+            continue
+
+        if q.lower() in blocked_en:
+            continue
+
+        cleaned.append(q)
+
+    return unique_keep_order(cleaned)[:15]
+
+
+@st.cache_data(show_spinner=False)
+def search_pnu_publications_by_keyword(keyword: str, per_page: int = 20) -> List[Dict]:
+    keyword = normalize_space(keyword)
+    if not keyword:
+        return []
+
+    params = {
+        "page": 1,
+        "current_page": 1,
+        "record_per_page": per_page,
+        "order_by": "score",
+        "order": "desc",
+        "sub_ks": keyword,
+    }
+
+    try:
+        r = SESSION.get(
+            PNU_SCHOLAR_PUBLICATIONS_API_URL,
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Referer": f"https://scholar.pusan.ac.kr/publications/?sub_ks={keyword}&order_by=score",
+            },
+        )
+        if r.status_code != 200:
+            return []
+
+        data = r.json()
+        records = ((data or {}).get("result") or {}).get("records") or []
+        return records if isinstance(records, list) else []
+    except Exception:
+        return []
+
+
+@st.cache_data(show_spinner=False)
+def search_pnu_publications_multi(queries_tuple: Tuple[str, ...]) -> List[Dict]:
+    queries = list(queries_tuple)
+    collected = []
+    seen = set()
+
+    for q in queries:
+        records = search_pnu_publications_by_keyword(q, per_page=20)
+        for rec in records:
+            key = (
+                rec.get("resource_id")
+                or rec.get("doi")
+                or rec.get("resource_title")
+                or json.dumps(rec, ensure_ascii=False)[:300]
+            )
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rec = dict(rec)
+            rec["_search_query"] = q
+            collected.append(rec)
+
+        if len(collected) >= MAX_PAPERS * 2:
+            break
+
+    return collected[: MAX_PAPERS * 2]
+
+
+def professor_author_to_verified_match(author: Dict) -> Dict:
+    """PNU Scholar publications API의 교수 저자 객체를 기존 researcher_map용 검증 DB 형태로 변환합니다."""
+    scholar_id = normalize_space(author.get("scholar_id", ""))
+    author_name = normalize_space(author.get("author_name", ""))
+    english_name = normalize_space(author.get("scholar_name_eng", "") or author.get("author_full_name", ""))
+    dept_id = normalize_space(author.get("dept_id", ""))
+    dept_name = normalize_space(author.get("dept_name", ""))
+    col_name = normalize_space(author.get("col_name", ""))
+    position = normalize_space(author.get("sinbun_name", ""))
+
+    profile_link = normalize_pnu_profile_link("", scholar_id)
+    dept_homepage_info = resolve_department_homepage(dept_id, dept_name)
+    department_homepage = normalize_space(dept_homepage_info.get("department_homepage", ""))
+    department_page = normalize_space(dept_homepage_info.get("department_page", ""))
+    official_link = department_homepage or department_page or profile_link
+    link_label = "학과 홈페이지 바로가기" if department_homepage else "PNU Scholar 바로가기"
+
+    return {
+        "official_name": author_name,
+        "display_name": author_name,
+        "english_name": english_name,
+        "korean_name": author_name,
+        "all_names": unique_keep_order([author_name, english_name]),
+        "department": format_department("", dept_name, col_name),
+        "link": official_link,
+        "link_label": link_label,
+        "pnu_profile_link": profile_link,
+        "department_homepage": department_homepage,
+        "department_page": department_page,
+        "department_code": dept_homepage_info.get("department_code", ""),
+        "dept_id": dept_id,
+        "dept_name": dept_name,
+        "col_id": normalize_space(author.get("col_id", "")),
+        "col_name": col_name,
+        "researcher_id": scholar_id,
+        "position": position,
+        "position_code": normalize_space(author.get("sinbun_code", "")),
+        "author_role": normalize_space(author.get("author_role", "")),
+        "verified": True,
+        "match_score": 1.0,
+        "matched_variant": author_name,
+        "evidence": f"PNU Scholar publications API 논문 저자 정보에서 교수 신분 확인: {author_name}",
+        "source": "pnu_publications_api",
+        "search_keyword": "",
+    }
+
+
+def normalize_pnu_publication_record(record: Dict, professor_authors: List[Dict], search_query: str = "") -> Dict:
+    title = normalize_space(record.get("resource_title", "제목 미상"))
+    topic = normalize_space((record.get("meta") or {}).get("scival_topic", ""))
+    topic_cluster = normalize_space((record.get("meta") or {}).get("scival_topic_cluster", ""))
+    summary = topic or topic_cluster or "PNU Scholar 논문 검색 결과 기반 후보"
+
+    author_names = [normalize_space(a.get("author_name", "")) for a in professor_authors if normalize_space(a.get("author_name", ""))]
+
+    return {
+        "resource_id": normalize_space(record.get("resource_id", "")),
+        "title": title,
+        "k_title": normalize_space(record.get("resource_title_translation", "")) or title,
+        "summary": summary,
+        "date": normalize_space(record.get("publish_year", "연도 미상")),
+        "publication_date": normalize_space(record.get("publish_year", "연도 미상")),
+        "venue": normalize_space(record.get("journal_title", "게재처 미상")),
+        "doi": normalize_space(record.get("doi", "")),
+        "registered_db": record.get("registered_db", []),
+        "search_query": search_query or normalize_space(record.get("_search_query", "")),
+        "raw_authors_info": [(name, True) for name in author_names],
+        "pnu_publication_authors": professor_authors,
+        "raw": record,
+    }
+
+
+def collect_pnu_publication_papers_and_matches(records: List[Dict]) -> Tuple[List[Dict], Dict[str, Dict], List[str]]:
+    """
+    PNU Scholar publications 검색 결과에서 교수 저자만 추출하고,
+    논문 객체와 이미 검증된 연구자 매칭 정보를 함께 반환합니다.
+    """
+    papers = []
+    scholar_matches: Dict[str, Dict] = {}
+    paper_authors = []
+    seen_papers = set()
+
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+
+        authors = rec.get("scholar") or []
+        if not isinstance(authors, list):
+            continue
+
+        professor_authors = [a for a in authors if isinstance(a, dict) and is_allowed_pnu_publication_professor(a)]
+        if not professor_authors:
+            continue
+
+        paper = normalize_pnu_publication_record(rec, professor_authors, rec.get("_search_query", ""))
+        paper_key = paper.get("resource_id") or paper.get("doi") or paper.get("title")
+        if paper_key in seen_papers:
+            continue
+        seen_papers.add(paper_key)
+        papers.append(paper)
+
+        for author in professor_authors:
+            db = professor_author_to_verified_match(author)
+            name = db.get("official_name")
+            if not name:
+                continue
+            if name not in scholar_matches:
+                scholar_matches[name] = db
+            paper_authors.append(name)
+
+        if len(papers) >= MAX_PAPERS:
+            break
+
+    return papers, scholar_matches, unique_keep_order(paper_authors)
 
 # =========================================================
 # OpenAlex 논문 검색
@@ -1904,10 +2335,11 @@ def score_paper_relevance(valid_papers: List[Dict], profile: Dict, tech_summary:
     blocks = []
 
     for i, p in enumerate(valid_papers, start=1):
-        abs_text = reconstruct_abstract(p.get("abstract_inverted_index"))
+        abs_text = reconstruct_abstract(p.get("abstract_inverted_index")) or p.get("summary", "")
         blocks.append(
             f"[{i}] Title: {p.get('title', '')}\n"
-            f"Abstract: {abs_text[:900]}\n"
+            f"Search Query: {p.get('search_query', '')}\n"
+            f"Abstract/Topic: {abs_text[:900]}\n"
         )
 
     prompt = f"""
@@ -2334,10 +2766,11 @@ def summarize_papers(valid_papers: List[Dict]) -> Dict[str, Dict[str, str]]:
     blocks = []
 
     for i, p in enumerate(valid_papers, start=1):
-        abs_text = reconstruct_abstract(p.get("abstract_inverted_index"))
+        abs_text = reconstruct_abstract(p.get("abstract_inverted_index")) or p.get("summary", "")
         blocks.append(
             f"[{i}] Title: {p.get('title')}\n"
-            f"Abstract: {abs_text[:700]}\n"
+            f"Search Query: {p.get('search_query', '')}\n"
+            f"Abstract/Topic: {abs_text[:700]}\n"
         )
 
     prompt = f"""
@@ -2711,19 +3144,35 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     if not request_meta.get("tech_summary") and profile.get("korean_summary"):
         request_meta["tech_summary"] = profile.get("korean_summary")
 
-    report(3, total_steps, "논문 검색", "OpenAlex에서 부산대 관련 논문을 수집하는 중입니다.")
-    openalex_search_terms = profile.get("openalex_queries") or profile.get("search_keywords", [])
+    report(3, total_steps, "논문 검색", "PNU Scholar publications API에서 논문과 교수 저자 정보를 직접 수집하는 중입니다.")
+    pnu_publication_queries = build_pnu_publication_queries(profile)
+    pnu_publication_records = search_pnu_publications_multi(tuple(pnu_publication_queries))
 
-    raw_papers = search_openalex(
-        tuple(openalex_search_terms),
-        tuple(profile.get("applications", [])),
-        tuple(profile.get("core_tech", [])),
-    )
+    report(4, total_steps, "부산대 논문 필터링", f"PNU Scholar 논문 {len(pnu_publication_records)}건에서 교수 신분 저자를 식별하는 중입니다.")
+    pnu_papers, paper_scholar_matches, filtered_paper_authors = collect_pnu_publication_papers_and_matches(pnu_publication_records)
+    paper_source = "PNU Scholar publications API"
 
-    report(4, total_steps, "부산대 논문 필터링", f"수집 논문 {len(raw_papers)}건에서 부산대 저자를 식별하는 중입니다.")
-    pnu_papers, _ = filter_pnu_papers(raw_papers)
+    # PNU Scholar 논문 검색에서 교수 저자를 찾지 못한 경우에만 OpenAlex를 보조 검증용으로 사용
+    if not pnu_papers:
+        report(4, total_steps, "OpenAlex 보조 검색", "PNU Scholar 논문 검색 결과가 부족하여 OpenAlex로 부산대 논문을 재검증하는 중입니다.")
+        openalex_search_terms = profile.get("openalex_queries") or profile.get("search_keywords", [])
+        raw_papers = search_openalex(
+            tuple(openalex_search_terms),
+            tuple(profile.get("applications", [])),
+            tuple(profile.get("core_tech", [])),
+        )
+        pnu_papers, _ = filter_pnu_papers(raw_papers)
+        paper_scholar_matches = {}
+        filtered_paper_authors = []
+        seen_paper_author = set()
+        for p in pnu_papers:
+            for name, is_pnu in p.get("raw_authors_info", []):
+                if is_pnu and name not in seen_paper_author:
+                    seen_paper_author.add(name)
+                    filtered_paper_authors.append(name)
+        paper_source = "OpenAlex 보조 검색"
 
-    report(5, total_steps, "논문 적합성 검토", f"부산대 논문 {len(pnu_papers)}건의 적합도를 평가하는 중입니다.")
+    report(5, total_steps, "논문 적합성 검토", f"{paper_source} 논문 {len(pnu_papers)}건의 적합도를 평가하는 중입니다.")
     paper_relevance_map = score_paper_relevance(
         pnu_papers,
         profile,
@@ -2734,17 +3183,9 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     if not valid_papers:
         valid_papers = pnu_papers[:MIN_RELEVANT_PAPERS]
 
-    filtered_paper_authors = []
-    seen_paper_author = set()
-
-    for p in valid_papers:
-        for name, is_pnu in p.get("raw_authors_info", []):
-            if is_pnu and name not in seen_paper_author:
-                seen_paper_author.add(name)
-                filtered_paper_authors.append(name)
-
     valid_patents = []
     patent_inventors = []
+
 
     if kipris_enabled():
         report(6, total_steps, "특허 검색", "KIPRIS에서 수요기술 연관 특허를 검색하는 중입니다.")
@@ -2777,22 +3218,28 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         request_meta.get("tech_summary", ""),
     )
 
-    all_people = unique_keep_order(filtered_paper_authors + patent_inventors)[:MAX_RESEARCHERS]
+    # PNU Scholar publications API에서 나온 논문 교수 저자는 이미 scholar_id/소속/신분이 확인되므로 재검색하지 않음.
+    # OpenAlex 보조 검색을 사용한 경우에만 논문 저자명을 재검증하고, 특허 발명자는 항상 재검증함.
+    paper_people_to_verify = [] if paper_scholar_matches else filtered_paper_authors
+    all_people = unique_keep_order(paper_people_to_verify + patent_inventors)[:MAX_RESEARCHERS]
 
     report(
         match_step,
         total_steps,
-        "PNU Scholar 연구자 검색",
-        f"논문 저자/특허 발명자 {len(all_people)}명을 PNU Scholar 검색창 방식으로 확인하는 중입니다.",
+        "PNU Scholar 연구자 확인",
+        f"논문 교수 {len(paper_scholar_matches)}명은 API 직접 확인, 특허/OpenAlex 후보 {len(all_people)}명은 검색창 방식으로 검증하는 중입니다.",
     )
 
-    # 네트워크 I/O 중심의 PNU Scholar 검색을 병렬 처리하여 대기 시간을 줄입니다.
-    # 각 매칭 결과에는 기존과 동일하게 학과 홈페이지 링크까지 포함됩니다.
-    scholar_matches, unmatched_people = match_people_to_pnu_scholar_parallel(
-        all_people,
-        person_context_map=person_context_map,
-        max_workers=4,
-    )
+    scholar_matches = dict(paper_scholar_matches)
+    unmatched_people = []
+
+    if all_people:
+        extra_matches, unmatched_people = match_people_to_pnu_scholar_parallel(
+            all_people,
+            person_context_map=person_context_map,
+            max_workers=4,
+        )
+        scholar_matches.update(extra_matches)
 
     report(
         summarize_step,
@@ -2839,19 +3286,23 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         lines.append("")
 
     keywords_text = ", ".join(profile.get("search_keywords", []))
+    pnu_publication_query_text = " / ".join(pnu_publication_queries)
     openalex_query_text = " / ".join(profile.get("openalex_queries", []))
     patent_keywords_text = ", ".join(profile.get("korean_patent_keywords", []))
 
     lines.append("### 🔍 논문·특허 분석 키워드")
     lines.append(f"- **핵심 키워드:** {keywords_text}")
-    if openalex_query_text:
-        lines.append(f"- **OpenAlex 검색식:** {openalex_query_text}")
+    if pnu_publication_query_text:
+        lines.append(f"- **PNU Scholar 논문 검색어:** {pnu_publication_query_text}")
+    if paper_source == "OpenAlex 보조 검색" and openalex_query_text:
+        lines.append(f"- **OpenAlex 보조 검색식:** {openalex_query_text}")
     if kipris_enabled():
         lines.append(f"- **특허 분석 키워드:** {patent_keywords_text}")
 
     lines.append("")
     lines.append("### 📊 분석 요약")
-    lines.append("- PNU Scholar 확인 방식: **연구자 검색창 sub_ks 검색 기반 확인**")
+    lines.append(f"- 논문 확인 방식: **{paper_source}**")
+    lines.append("- 특허 연구자 확인 방식: **발명자명 기반 PNU Scholar 검색 검증**")
     lines.append(f"- 검토 논문 수: **{len(pnu_papers)}건**")
     lines.append(f"- 적합성 통과 논문 수: **{len(valid_papers)}건** (High {high_count}건 / Medium {medium_count}건)")
 
@@ -2861,7 +3312,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     else:
         lines.append("- KIPRIS_API_KEY가 없어 특허 검색은 건너뜀")
 
-    lines.append(f"- 검토 연구자 수: **{len(all_people)}명**")
+    lines.append(f"- 검토 연구자 수: **{len(scholar_matches) + len(unmatched_people)}명**")
     lines.append(f"- 최종 추천 후보 수: **{len(researcher_map)}명**")
     lines.append(f"- PNU Scholar 검색 확인: **{verified_count}명**")
     lines.append(f"- PNU Scholar 미확인 후보: **{unverified_count}명**")
@@ -2872,7 +3323,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         lines.append("## ⚠️ 추천 결과 없음")
         lines.append("")
         lines.append("- 논문 또는 특허 후보는 일부 확인되었으나, 최종 연구자 맵 구성에 실패했습니다.")
-        lines.append("- 입력 기술 키워드가 너무 포괄적이거나, OpenAlex/KIPRIS 검색 결과가 부족할 수 있습니다.")
+        lines.append("- 입력 기술 키워드가 너무 포괄적이거나, PNU Scholar/OpenAlex/KIPRIS 검색 결과가 부족할 수 있습니다.")
 
         return {
             "main_markdown": "\n".join(lines),
