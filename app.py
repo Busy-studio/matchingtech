@@ -3430,7 +3430,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 st.title("🎓 PNU 수요기술-연구자 매칭 시스템")
 st.caption(
     "수요기술에 맞는 부산대 논문 저자와 특허 발명자를 찾고, "
-    "수요기술과 적합한 PNU 연구자를 매칭합니다."
+    "적합한 PNU 연구자와 수료기술 매칭합니다."
 )
 
 debug_name = st.sidebar.text_input(
