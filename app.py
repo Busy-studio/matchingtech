@@ -4,6 +4,7 @@ import json
 import time
 import html
 import difflib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional, Any
 import xml.etree.ElementTree as ET
 
@@ -1304,8 +1305,6 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
                 r["used_query"] = q
             all_results.extend(results)
 
-        time.sleep(0.12)
-
         if len(all_results) >= 5:
             break
 
@@ -1367,6 +1366,52 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
     )
 
     return best
+
+
+def match_people_to_pnu_scholar_parallel(
+    people: List[str],
+    max_workers: int = 6,
+) -> Tuple[Dict[str, Dict], List[str]]:
+    """
+    논문 저자/특허 발명자 목록을 PNU Scholar에 병렬 매칭합니다.
+    각 매칭 결과에는 기존 로직 그대로 학과 홈페이지 링크까지 포함됩니다.
+    """
+    people = unique_keep_order([p for p in people if normalize_space(p)])
+
+    scholar_matches: Dict[str, Dict] = {}
+    unmatched_people: List[str] = []
+
+    if not people:
+        return scholar_matches, unmatched_people
+
+    def worker(person_name: str) -> Tuple[str, Optional[Dict]]:
+        try:
+            matched = match_author_to_pnu_scholar(person_name)
+            return person_name, matched
+        except Exception:
+            return person_name, None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(worker, person_name): person_name
+            for person_name in people
+        }
+
+        for future in as_completed(future_map):
+            person_name = future_map[future]
+            try:
+                original_name, matched = future.result()
+            except Exception:
+                unmatched_people.append(person_name)
+                continue
+
+            if matched:
+                matched["verified"] = True
+                scholar_matches[original_name] = matched
+            else:
+                unmatched_people.append(original_name)
+
+    return scholar_matches, unmatched_people
 
 
 # =========================================================
@@ -2378,16 +2423,12 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         f"논문 저자/특허 발명자 {len(all_people)}명을 PNU Scholar 검색창 방식으로 확인하는 중입니다.",
     )
 
-    scholar_matches = {}
-    unmatched_people = []
-
-    for name in all_people:
-        matched = match_author_to_pnu_scholar(name)
-        if matched:
-            matched["verified"] = True
-            scholar_matches[name] = matched
-        else:
-            unmatched_people.append(name)
+    # 네트워크 I/O 중심의 PNU Scholar 검색을 병렬 처리하여 대기 시간을 줄입니다.
+    # 각 매칭 결과에는 기존과 동일하게 학과 홈페이지 링크까지 포함됩니다.
+    scholar_matches, unmatched_people = match_people_to_pnu_scholar_parallel(
+        all_people,
+        max_workers=6,
+    )
 
     report(
         summarize_step,
