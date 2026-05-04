@@ -22,7 +22,7 @@ except Exception:
 # 기본 설정
 # =========================================================
 st.set_page_config(
-    page_title="부산대 수요기술-연구자 증거형 매칭 시스템",
+    page_title="부산대 수요기술-연구자 매칭 시스템",
     layout="wide",
 )
 
@@ -30,6 +30,7 @@ OPENALEX_URL = "https://api.openalex.org/works"
 
 PNU_SCHOLAR_API_URL = "https://scholar.pusan.ac.kr/wp-json/rm/v1/scholars"
 PNU_SCHOLAR_SEARCH_PAGE = "https://scholar.pusan.ac.kr/researchers/"
+PNU_SCHOLAR_KEYWORD_CLOUD_API_URL = "https://scholar.pusan.ac.kr/wp-json/rm/v1/stats/keyword_cloud"
 
 KIPRIS_BASE_URL = "https://plus.kipris.or.kr/kipo-api/kipi/patUtiModInfoSearchSevice"
 
@@ -250,7 +251,7 @@ def format_department(affiliation: str, department: str = "", college: str = "")
         return department
     if college:
         return college
-    return "PNU Scholar 검색 결과 기반 확인"
+    return "검색 결과 확인"
 
 
 def is_name_like(text: str) -> bool:
@@ -802,7 +803,7 @@ def find_researcher_id_from_flat(flat: Dict[str, str]) -> str:
             return m.group(1)
 
     # 2) API 원본의 id/post_id/researcher_id/scholar_id 계열 후보 추출
-    id_hints = ["researcher_id", "scholar_id", "post_id", "id"]
+    id_hints = ["researcher_id", "researcher", "scholar_id", "author_id", "user_id", "post_id", "rid", "id"]
     for key, val in flat.items():
         k = key.lower()
         v = normalize_space(val)
@@ -937,6 +938,187 @@ def extract_keyword_cloud_terms_from_html(html_text: str, max_terms: int = 12) -
     return unique_keep_order(cleaned)[:max_terms]
 
 
+def extract_keyword_terms_from_api_result(data: Any, max_terms: int = 12) -> List[str]:
+    """
+    PNU Scholar Keyword Cloud REST API 응답에서 키워드 문자열만 최대한 보수적으로 추출합니다.
+    API 응답 구조가 바뀌어도 result/data/items/list 내부를 재귀적으로 탐색합니다.
+    """
+    terms = []
+
+    def add_term(value: Any):
+        if value is None:
+            return
+        if isinstance(value, (int, float, bool)):
+            return
+
+        text = normalize_space(strip_tags(str(value)))
+        if not text:
+            return
+
+        # 쉼표/세미콜론으로 묶여 오는 경우까지 분리
+        pieces = re.split(r"[,;|]", text) if len(text) > 80 else [text]
+        for piece in pieces:
+            piece = normalize_space(piece).strip(" -_.,;:()[]{}\"'")
+            if piece:
+                terms.append(piece)
+
+    def walk(obj: Any):
+        if isinstance(obj, dict):
+            keyword_keys = {
+                "keyword",
+                "keywords",
+                "name",
+                "text",
+                "label",
+                "word",
+                "term",
+                "title",
+                "key",
+            }
+
+            for k, v in obj.items():
+                kl = str(k).lower()
+
+                # count, value, weight, size 같은 수치 필드는 키워드로 쓰지 않음
+                if kl in {"count", "cnt", "value", "weight", "size", "score", "rank"}:
+                    continue
+
+                if any(h == kl or h in kl for h in keyword_keys):
+                    if isinstance(v, (str, int, float)):
+                        add_term(v)
+                    else:
+                        walk(v)
+                else:
+                    walk(v)
+
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+        elif isinstance(obj, str):
+            add_term(obj)
+
+    walk(data)
+
+    blocked = {
+        "keyword cloud",
+        "researcher",
+        "researchers",
+        "publication",
+        "publications",
+        "pnu scholar",
+        "pusan national university",
+        "busan national university",
+        "loading",
+        "null",
+        "none",
+        "true",
+        "false",
+        "status",
+        "result",
+    }
+
+    cleaned = []
+    for term in terms:
+        t = normalize_space(term).strip(" -_.,;:()[]{}\"'")
+        tl = t.lower()
+
+        if not t:
+            continue
+        if len(t) < 2 or len(t) > 80:
+            continue
+        if tl in blocked:
+            continue
+        if re.fullmatch(r"\d+", t):
+            continue
+        if re.search(r"^(http|www\.)", tl):
+            continue
+        if any(b in tl for b in ["copyright", "privacy", "login", "notice", "all rights"]):
+            continue
+
+        cleaned.append(t)
+
+    return unique_keep_order(cleaned)[:max_terms]
+
+
+@st.cache_data(show_spinner=False)
+def fetch_keyword_cloud_by_researcher_id(researcher_id: str) -> List[str]:
+    """
+    F12 Network에서 확인되는 /wp-json/rm/v1/stats/keyword_cloud API를 직접 호출합니다.
+    파라미터명이 환경마다 다를 수 있어 GET/POST + 여러 후보명을 순차적으로 시도합니다.
+    """
+    researcher_id = normalize_space(researcher_id)
+    if not researcher_id:
+        return []
+
+    param_candidates = [
+        {"id": researcher_id},
+        {"researcher_id": researcher_id},
+        {"researcher": researcher_id},
+        {"author_id": researcher_id},
+        {"scholar_id": researcher_id},
+        {"user_id": researcher_id},
+        {"post_id": researcher_id},
+        {"rid": researcher_id},
+    ]
+
+    # 1) GET query string 방식
+    for params in param_candidates:
+        try:
+            r = SESSION.get(
+                PNU_SCHOLAR_KEYWORD_CLOUD_API_URL,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            terms = extract_keyword_terms_from_api_result(data)
+            if terms:
+                return terms
+        except Exception:
+            continue
+
+    # 2) POST form 방식
+    for params in param_candidates:
+        try:
+            r = SESSION.post(
+                PNU_SCHOLAR_KEYWORD_CLOUD_API_URL,
+                data=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            terms = extract_keyword_terms_from_api_result(data)
+            if terms:
+                return terms
+        except Exception:
+            continue
+
+    # 3) POST JSON 방식
+    for params in param_candidates:
+        try:
+            r = SESSION.post(
+                PNU_SCHOLAR_KEYWORD_CLOUD_API_URL,
+                json=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            terms = extract_keyword_terms_from_api_result(data)
+            if terms:
+                return terms
+        except Exception:
+            continue
+
+    return []
+
+
 @st.cache_data(show_spinner=False)
 def translate_keyword_cloud_to_korean_cached(keywords_tuple: Tuple[str, ...]) -> List[str]:
     keywords = [normalize_space(x) for x in keywords_tuple if normalize_space(x)]
@@ -978,9 +1160,26 @@ def translate_keyword_cloud_to_korean_cached(keywords_tuple: Tuple[str, ...]) ->
     return keywords
 
 
-def get_korean_keyword_cloud_from_profile(profile_link: str) -> str:
-    html_text = fetch_pnu_profile_html(profile_link)
-    keywords = extract_keyword_cloud_terms_from_html(html_text)
+def get_korean_keyword_cloud_from_profile(profile_link: str, researcher_id: str = "") -> str:
+    """
+    연구자 상세페이지 번호가 있으면 Keyword Cloud API를 먼저 호출하고,
+    실패할 경우 기존 HTML 파싱 방식으로 보조 추출합니다.
+    """
+    profile_link = normalize_space(profile_link)
+    researcher_id = normalize_space(researcher_id)
+
+    if not researcher_id and profile_link:
+        m = re.search(r"/researchers/(\d+)/?", profile_link)
+        if m:
+            researcher_id = m.group(1)
+
+    # 1순위: F12에서 확인된 REST API 직접 호출
+    keywords = fetch_keyword_cloud_by_researcher_id(researcher_id)
+
+    # 2순위: 상세페이지 HTML 내 Keyword Cloud 텍스트 파싱
+    if not keywords:
+        html_text = fetch_pnu_profile_html(profile_link)
+        keywords = extract_keyword_cloud_terms_from_html(html_text)
 
     if not keywords:
         return "Keyword Cloud 자동 추출 실패"
@@ -1010,7 +1209,7 @@ def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Opti
     researcher_id = find_researcher_id_from_flat(flat)
     profile_link = normalize_pnu_profile_link(raw_profile_link, researcher_id)
 
-    keyword_cloud_ko = get_korean_keyword_cloud_from_profile(profile_link)
+    keyword_cloud_ko = get_korean_keyword_cloud_from_profile(profile_link, researcher_id)
 
     all_names = unique_keep_order(
         [
@@ -1068,7 +1267,7 @@ def parse_scholar_html_results(html_text: str, search_keyword: str = "") -> List
             continue
 
         profile_link = normalize_pnu_profile_link(href, researcher_id)
-        keyword_cloud_ko = get_korean_keyword_cloud_from_profile(profile_link)
+        keyword_cloud_ko = get_korean_keyword_cloud_from_profile(profile_link, researcher_id)
 
         all_names = unique_keep_order(
             [
@@ -2482,14 +2681,14 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
 # =========================================================
 # Streamlit UI
 # =========================================================
-st.title("🎓 PNU 수요기술-연구자 증거형 매칭 시스템")
+st.title("🎓 PNU 수요기술-연구자 매칭 시스템")
 st.caption(
     "수요기술에 맞는 부산대 논문 저자와 특허 발명자를 찾고, "
-    "PNU Scholar 연구자 검색창 방식으로 실제 검색 결과를 확인합니다."
+    "적합한 PNU 연구자와 수요기술을 매칭합니다."
 )
 
 debug_name = st.sidebar.text_input(
-    "디버그: PNU Scholar 이름 직접 검색",
+    "디버그: 이름 직접 검색",
     placeholder="예: Gil-Dong Hong 또는 홍길동",
 )
 
