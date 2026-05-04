@@ -1076,7 +1076,6 @@ def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Opti
             kor_name,
             detail_kor,
             detail_eng,
-            search_keyword if has_korean(search_keyword) else "",
             eng_name.replace(",", "") if eng_name else "",
             eng_name.replace("-", " ") if eng_name else "",
             eng_name.replace("-", "") if eng_name else "",
@@ -1086,8 +1085,6 @@ def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Opti
 
     if kor_name:
         official_name = kor_name
-    elif has_korean(search_keyword):
-        official_name = search_keyword
     else:
         official_name = eng_name or display_name
 
@@ -1095,7 +1092,7 @@ def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Opti
         "official_name": official_name,
         "display_name": display_name,
         "english_name": eng_name,
-        "korean_name": kor_name or (search_keyword if has_korean(search_keyword) else ""),
+        "korean_name": kor_name,
         "all_names": all_names,
         "department": department,
         "link": official_link,
@@ -1159,7 +1156,6 @@ def parse_scholar_html_results(html_text: str, search_keyword: str = "") -> List
                 display_name,
                 eng_name,
                 kor_name,
-                search_keyword if has_korean(search_keyword) else "",
                 eng_name.replace(",", "") if eng_name else "",
                 eng_name.replace("-", " ") if eng_name else "",
                 eng_name.replace("-", "") if eng_name else "",
@@ -1167,14 +1163,14 @@ def parse_scholar_html_results(html_text: str, search_keyword: str = "") -> List
             ]
         )
 
-        official_name = kor_name or (search_keyword if has_korean(search_keyword) else "") or eng_name or display_name
+        official_name = kor_name or eng_name or display_name
 
         results.append(
             {
                 "official_name": official_name,
                 "display_name": display_name,
                 "english_name": eng_name,
-                "korean_name": kor_name or (search_keyword if has_korean(search_keyword) else ""),
+                "korean_name": kor_name,
                 "all_names": all_names,
                 "department": "PNU Scholar 검색 결과 기반 확인",
                 "link": "https://scholar.pusan.ac.kr/researchers/",
@@ -1289,6 +1285,53 @@ def score_scholar_result_against_author(author_name: str, result: Dict) -> Tuple
     return best_score, best_variant
 
 
+def is_strict_name_match(author_name: str, result: Dict, min_score: float) -> Tuple[bool, float, str]:
+    """
+    검색어 자체를 후보 이름으로 간주하지 않고, PNU Scholar record/detail에서
+    실제로 확인된 이름만 기준으로 검증합니다.
+    """
+    candidate_names = unique_keep_order(
+        [
+            result.get("display_name", ""),
+            result.get("english_name", ""),
+            result.get("korean_name", ""),
+            result.get("official_name", ""),
+        ]
+        + [n for n in (result.get("all_names", []) or []) if normalize_space(n)]
+    )
+
+    # 검색어가 후보명에 주입되어 생기는 오검증 방지
+    search_keyword = normalize_space(result.get("search_keyword", "") or result.get("used_query", ""))
+    if search_keyword:
+        candidate_names = [
+            n for n in candidate_names
+            if normalize_name_for_match(n) != normalize_name_for_match(search_keyword)
+        ]
+
+    if not candidate_names:
+        return False, 0.0, ""
+
+    variants = build_name_variants(author_name)
+    best_score = 0.0
+    best_variant = ""
+
+    for q in variants:
+        for c in candidate_names:
+            score = name_similarity(q, c)
+            if score > best_score:
+                best_score = score
+                best_variant = c
+
+    # 한글 이름은 완전 일치만 검증 처리
+    if has_korean(author_name):
+        q_norms = {normalize_name_for_match(q) for q in variants if normalize_name_for_match(q)}
+        c_norms = {normalize_name_for_match(c) for c in candidate_names if normalize_name_for_match(c)}
+        exact = bool(q_norms & c_norms)
+        return exact, 1.0 if exact else best_score, best_variant
+
+    return best_score >= min_score, best_score, best_variant
+
+
 def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
     name = normalize_space(author_name)
     if not name:
@@ -1333,30 +1376,18 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
         norm_len = len(normalize_name_for_match(name))
         threshold = 0.78 if norm_len >= 10 else 0.82
 
-    query_exact_hit = False
-    for q in search_queries:
-        qn = normalize_name_for_match(q)
-        display_blob = normalize_name_for_match(
-            " ".join(
-                [
-                    best.get("display_name", ""),
-                    best.get("english_name", ""),
-                    best.get("korean_name", ""),
-                    best.get("official_name", ""),
-                ]
-            )
-        )
-        if qn and qn in display_blob:
-            query_exact_hit = True
-            break
-
-    if best_score < threshold and not query_exact_hit:
+    strict_ok, strict_score, strict_variant = is_strict_name_match(name, best, threshold)
+    if not strict_ok:
         return None
+
+    best_score = strict_score
+    if strict_variant:
+        best_variant = strict_variant
 
     used_query = best.get("used_query") or best.get("search_keyword") or search_queries[0]
 
     best["verified"] = True
-    best["match_score"] = round(max(best_score, 0.8 if query_exact_hit else best_score), 3)
+    best["match_score"] = round(best_score, 3)
     best["matched_variant"] = best_variant
     best["query_name"] = name
     best["search_keyword"] = used_query
