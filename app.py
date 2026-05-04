@@ -1105,6 +1105,8 @@ def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Opti
         "dept_name": dept_name,
         "col_id": normalize_space(scholar_detail.get("col_id") or ""),
         "col_name": col_name,
+        "position": normalize_space(scholar_detail.get("sinbun_name") or flat.get("sinbun_name") or ""),
+        "is_working": normalize_space(scholar_detail.get("is_working") or flat.get("is_working") or ""),
         "researcher_id": researcher_id,
         "evidence": f"PNU Scholar 검색어 '{search_keyword}'로 검색 결과 확인: {display_name}",
         "source": "pnu_scholar_api",
@@ -1179,6 +1181,8 @@ def parse_scholar_html_results(html_text: str, search_keyword: str = "") -> List
                 "department_homepage": "",
                 "department_page": "",
                 "department_code": "",
+                "position": "",
+                "is_working": "",
                 "researcher_id": "",
                 "evidence": f"PNU Scholar 검색어 '{search_keyword}'로 HTML 검색 결과 확인: {display_name}",
                 "source": "pnu_scholar_html",
@@ -1337,11 +1341,279 @@ def is_strict_name_match(author_name: str, result: Dict, min_score: float) -> Tu
     return best_score >= min_score, best_score, best_variant
 
 
-def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
+
+PROFESSOR_POSITION_PRIORITY = {
+    "교수": 45,
+    "부교수": 43,
+    "조교수": 41,
+    "명예교수": 28,
+    "석좌교수": 46,
+    "특임교수": 35,
+    "연구교수": 30,
+    "초빙교수": 28,
+    "겸임교수": 24,
+    "강사": 8,
+    "연구원": 5,
+    "대학원생": -10,
+    "학부생": -20,
+}
+
+DEPARTMENT_CONTEXT_KEYWORDS = {
+    "산업공학": [
+        "container", "terminal", "port", "logistics", "operation", "operations", "simulation",
+        "discrete event", "scheduling", "optimization", "supply chain", "manufacturing",
+        "big data", "iot", "equipment", "smart factory", "process", "queue", "workflow",
+        "컨테이너", "터미널", "항만", "물류", "운영", "시뮬레이션", "이산 사건", "스케줄링",
+        "최적화", "공급망", "제조", "빅데이터", "장비", "공정", "스마트팩토리", "금형",
+    ],
+    "데이터사이언스": ["data", "machine learning", "deep learning", "ai", "prediction", "analytics", "데이터", "기계학습", "인공지능", "예측"],
+    "컴퓨터": ["software", "algorithm", "network", "security", "computer", "ai", "iot", "소프트웨어", "알고리즘", "네트워크", "보안"],
+    "의학": ["medical", "skin", "dermal", "wound", "regeneration", "pdrn", "cell", "clinical", "의료", "피부", "상처", "재생", "세포", "임상"],
+    "의생명": ["biomaterial", "bio", "cell", "tissue", "regeneration", "collagen", "ecm", "바이오", "생체", "세포", "조직", "재생", "콜라겐"],
+    "생명": ["bio", "cell", "protein", "gene", "metabolism", "바이오", "세포", "단백질", "유전자", "대사"],
+    "식품": ["food", "nutrition", "extract", "functional", "식품", "영양", "추출물", "기능성"],
+    "해양": ["marine", "algae", "seaweed", "ocean", "해양", "해조류", "괭생이모자반", "미더덕"],
+    "환경": ["environment", "waste", "pollution", "water", "환경", "폐자원", "오염", "수처리"],
+    "화학": ["compound", "polymer", "synthesis", "material", "chemical", "화합물", "고분자", "합성", "소재"],
+    "고분자": ["polymer", "film", "composite", "nanocomposite", "고분자", "필름", "복합재", "나노복합"],
+    "기계": ["robot", "mechanical", "equipment", "machine", "manufacturing", "로봇", "기계", "장비", "제조"],
+    "전기전자": ["semiconductor", "sensor", "device", "electronics", "iot", "반도체", "센서", "소자", "전자"],
+}
+
+
+def normalize_position_name(position: str) -> str:
+    return normalize_space(position)
+
+
+def score_position_priority(position: str) -> int:
+    pos = normalize_position_name(position)
+    if not pos:
+        return 0
+    # 세부 직위가 "부교수"인데 "교수"에 먼저 걸리지 않도록 긴 키 우선
+    for key in sorted(PROFESSOR_POSITION_PRIORITY.keys(), key=len, reverse=True):
+        if key in pos:
+            return PROFESSOR_POSITION_PRIORITY[key]
+    return 0
+
+
+def is_professor_like(position: str) -> bool:
+    pos = normalize_position_name(position)
+    return any(k in pos for k in ["교수", "부교수", "조교수", "석좌교수", "특임교수", "연구교수", "초빙교수", "겸임교수"])
+
+
+def score_department_context_relevance(result: Dict, context_text: str) -> int:
+    """
+    동명이인 후보가 있을 때 학과/전공과 논문·특허 제목/요약 맥락의 연관성을 점수화합니다.
+    직접적인 의미판단이 아니라 키워드 기반 보조 점수입니다.
+    """
+    ctx = safe_lower(context_text)
+    if not ctx:
+        return 0
+
+    dept_blob = normalize_space(
+        " ".join(
+            [
+                result.get("department", ""),
+                result.get("dept_name", ""),
+                result.get("col_name", ""),
+                result.get("display_name", ""),
+            ]
+        )
+    )
+    dept_low = dept_blob.lower()
+
+    score = 0
+
+    for dept_key, keywords in DEPARTMENT_CONTEXT_KEYWORDS.items():
+        if dept_key.lower() in dept_low or dept_key in dept_blob:
+            hit = sum(1 for kw in keywords if kw.lower() in ctx)
+            if hit:
+                score += min(35, 8 + hit * 4)
+
+    # 학과명 자체가 맥락에 직접 등장하면 강한 가점
+    dept_name = normalize_space(result.get("dept_name", ""))
+    if dept_name and dept_name in context_text:
+        score += 25
+
+    # 관련성 낮은 일반 센터/대학원 협동과정은 맥락점수가 없으면 약한 감점
+    if any(x in dept_blob for x in ["센터", "협동과정", "국제교육", "교육개발"]):
+        if score == 0:
+            score -= 8
+
+    return score
+
+
+def build_person_context_map(valid_papers: List[Dict], valid_patents: List[Dict], profile: Dict, tech_summary: str) -> Dict[str, Dict]:
+    """
+    이름별로 논문/특허 제목·요약·적합성 근거를 모아 동명이인 후보 선택에 사용합니다.
+    """
+    ctx_map: Dict[str, Dict] = {}
+
+    def ensure(name: str) -> Dict:
+        name = normalize_space(name)
+        if name not in ctx_map:
+            ctx_map[name] = {
+                "texts": [],
+                "source_types": set(),
+                "joint_patent": False,
+                "pnu_only_patent": False,
+            }
+        return ctx_map[name]
+
+    base_profile_text = " ".join(
+        [
+            tech_summary or "",
+            profile.get("optimized_query_ko", "") if isinstance(profile, dict) else "",
+            profile.get("optimized_query_en", "") if isinstance(profile, dict) else "",
+            " ".join(profile.get("core_tech", []) or []) if isinstance(profile, dict) else "",
+            " ".join(profile.get("search_keywords", []) or []) if isinstance(profile, dict) else "",
+        ]
+    )
+
+    for p in valid_papers or []:
+        paper_text = " ".join(
+            [
+                base_profile_text,
+                p.get("title", ""),
+                p.get("paper_reason", ""),
+                p.get("venue", ""),
+                reconstruct_abstract(p.get("abstract_inverted_index"))[:1000],
+            ]
+        )
+        for name, is_pnu in p.get("raw_authors_info", []):
+            if not is_pnu:
+                continue
+            entry = ensure(name)
+            entry["texts"].append(paper_text)
+            entry["source_types"].add("paper")
+
+    for p in valid_patents or []:
+        applicants = [normalize_space(x) for x in p.get("applicant_names", []) if normalize_space(x)]
+        pnu_applicants = [a for a in applicants if ("부산대학교" in a or "Pusan National" in a or "Busan National" in a)]
+        joint_patent = bool(applicants and len(applicants) > len(pnu_applicants))
+        pnu_only_patent = bool(applicants and len(applicants) == len(pnu_applicants))
+
+        patent_text = " ".join(
+            [
+                base_profile_text,
+                p.get("title", ""),
+                p.get("abstract", ""),
+                p.get("patent_reason", ""),
+                " ".join(applicants),
+            ]
+        )
+        for name in p.get("inventor_names", []) or []:
+            entry = ensure(name)
+            entry["texts"].append(patent_text)
+            entry["source_types"].add("patent")
+            entry["joint_patent"] = bool(entry.get("joint_patent") or joint_patent)
+            entry["pnu_only_patent"] = bool(entry.get("pnu_only_patent") or pnu_only_patent)
+
+    # set은 cache/병렬 전달 시 다루기 편하게 list로 변환
+    for entry in ctx_map.values():
+        entry["source_types"] = sorted(list(entry.get("source_types", [])))
+        entry["context_text"] = compact_text("\n".join(entry.get("texts", [])), 6000)
+
+    return ctx_map
+
+
+def rank_scholar_candidate(author_name: str, result: Dict, context_info: Optional[Dict] = None) -> Tuple[float, str, Dict]:
+    context_info = context_info or {}
+    context_text = context_info.get("context_text", "") or ""
+
+    # 이름 일치 점수
+    name_score, matched_variant = score_scholar_result_against_author(author_name, result)
+
+    position = normalize_space(result.get("position", ""))
+    position_score = score_position_priority(position)
+    dept_score = score_department_context_relevance(result, context_text)
+
+    # 상세 API에서 소속/직위가 확인되는 후보에 약한 가점
+    completeness_score = 0
+    if result.get("dept_name") or result.get("department_homepage"):
+        completeness_score += 4
+    if result.get("researcher_id"):
+        completeness_score += 3
+    if result.get("is_working") == "y":
+        completeness_score += 3
+
+    source_types = set(context_info.get("source_types", []) or [])
+    patent_only = source_types == {"patent"}
+    joint_patent = bool(context_info.get("joint_patent"))
+
+    # 특허 발명자만으로 검증되는 경우는 동명이인 위험이 높으므로 보수적으로 처리
+    conservative_penalty = 0
+    if patent_only and joint_patent:
+        conservative_penalty -= 12
+        if not is_professor_like(position):
+            conservative_penalty -= 25
+
+    total = (name_score * 100) + position_score + dept_score + completeness_score + conservative_penalty
+
+    debug = {
+        "name_score": round(name_score, 3),
+        "position_score": position_score,
+        "dept_context_score": dept_score,
+        "completeness_score": completeness_score,
+        "conservative_penalty": conservative_penalty,
+        "position": position,
+    }
+    return total, matched_variant, debug
+
+
+def choose_best_scholar_candidate(author_name: str, candidates: List[Dict], context_info: Optional[Dict] = None) -> Optional[Dict]:
+    if not candidates:
+        return None
+
+    context_info = context_info or {}
+
+    # 이름이 실제 Scholar 응답과 엄격히 맞는 후보만 남김
+    strict_candidates = []
+    for r in candidates:
+        ok, strict_score, strict_variant = is_strict_name_match(author_name, r, 0.99 if has_korean(author_name) else 0.78)
+        if ok:
+            r = dict(r)
+            r["_strict_score"] = strict_score
+            r["_strict_variant"] = strict_variant
+            strict_candidates.append(r)
+
+    if not strict_candidates:
+        return None
+
+    ranked = []
+    for r in strict_candidates:
+        total, matched_variant, debug = rank_scholar_candidate(author_name, r, context_info)
+        r["_rank_score"] = total
+        r["_rank_debug"] = debug
+        r["_rank_matched_variant"] = matched_variant or r.get("_strict_variant", "")
+        ranked.append(r)
+
+    ranked.sort(key=lambda x: x.get("_rank_score", 0), reverse=True)
+
+    best = ranked[0]
+    second = ranked[1] if len(ranked) > 1 else None
+
+    # 특허 단독 + 공동출원 + 교수계열 아님이면 확인 후보로 올리지 않음
+    source_types = set(context_info.get("source_types", []) or [])
+    if source_types == {"patent"} and context_info.get("joint_patent") and not is_professor_like(best.get("position", "")):
+        return None
+
+    # 동명이인인데 1·2위 차이가 너무 작으면 오매칭 방지를 위해 미확인 처리
+    if second and (best.get("_rank_score", 0) - second.get("_rank_score", 0) < 8):
+        best_prof = is_professor_like(best.get("position", ""))
+        second_prof = is_professor_like(second.get("position", ""))
+        # 교수계열 우선순위 또는 맥락점수 차이가 명확하지 않으면 보류
+        if best_prof == second_prof and abs(best.get("_rank_debug", {}).get("dept_context_score", 0) - second.get("_rank_debug", {}).get("dept_context_score", 0)) < 8:
+            return None
+
+    return best
+
+def match_author_to_pnu_scholar(author_name: str, context_info: Optional[Dict] = None) -> Optional[Dict]:
     name = normalize_space(author_name)
     if not name:
         return None
 
+    context_info = context_info or {}
     search_queries = build_name_variants(name)
     all_results = []
 
@@ -1353,7 +1625,7 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
                 r["used_query"] = q
             all_results.extend(results)
 
-        if len(all_results) >= 5:
+        if len(all_results) >= 8:
             break
 
     all_results = dedupe_scholar_results(all_results)
@@ -1361,17 +1633,7 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
     if not all_results:
         return None
 
-    best = None
-    best_score = 0.0
-    best_variant = ""
-
-    for r in all_results:
-        score, matched_variant = score_scholar_result_against_author(name, r)
-        if score > best_score:
-            best_score = score
-            best_variant = matched_variant
-            best = r
-
+    best = choose_best_scholar_candidate(name, all_results, context_info)
     if not best:
         return None
 
@@ -1385,17 +1647,15 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
     if not strict_ok:
         return None
 
-    best_score = strict_score
-    if strict_variant:
-        best_variant = strict_variant
-
     used_query = best.get("used_query") or best.get("search_keyword") or search_queries[0]
 
     best["verified"] = True
-    best["match_score"] = round(best_score, 3)
-    best["matched_variant"] = best_variant
+    best["match_score"] = round(strict_score, 3)
+    best["matched_variant"] = best.get("_rank_matched_variant") or strict_variant
     best["query_name"] = name
     best["search_keyword"] = used_query
+    best["rank_score"] = round(float(best.get("_rank_score", 0)), 3)
+    best["rank_debug"] = best.get("_rank_debug", {})
     best["evidence"] = (
         f"PNU Scholar 연구자 검색에서 '{used_query}' 검색 결과 확인: "
         f"{best.get('display_name') or best.get('official_name')}"
@@ -1406,6 +1666,7 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
 
 def match_people_to_pnu_scholar_parallel(
     people: List[str],
+    person_context_map: Optional[Dict[str, Dict]] = None,
     max_workers: int = 4,
 ) -> Tuple[Dict[str, Dict], List[str]]:
     """
@@ -1417,6 +1678,7 @@ def match_people_to_pnu_scholar_parallel(
     - 매칭된 연구자는 기존 로직대로 학과 홈페이지 링크까지 포함
     """
     people = unique_keep_order([p for p in people if normalize_space(p)])
+    person_context_map = person_context_map or {}
 
     scholar_matches: Dict[str, Dict] = {}
     unmatched_people: List[str] = []
@@ -1426,7 +1688,7 @@ def match_people_to_pnu_scholar_parallel(
 
     def worker(person_name: str) -> Tuple[str, Optional[Dict]]:
         try:
-            matched = match_author_to_pnu_scholar(person_name)
+            matched = match_author_to_pnu_scholar(person_name, person_context_map.get(person_name, {}))
             return person_name, matched
         except Exception:
             return person_name, None
@@ -1457,7 +1719,7 @@ def match_people_to_pnu_scholar_parallel(
     retry_unmatched: List[str] = []
     for person_name in unmatched_people:
         try:
-            matched = match_author_to_pnu_scholar(person_name)
+            matched = match_author_to_pnu_scholar(person_name, person_context_map.get(person_name, {}))
             if matched:
                 matched["verified"] = True
                 scholar_matches[person_name] = matched
@@ -2200,6 +2462,9 @@ def build_researcher_map(
                     "english_name": db.get("english_name", ""),
                     "korean_name": db.get("korean_name", ""),
                     "search_keyword": db.get("search_keyword", "") or db.get("used_query", ""),
+                    "position": db.get("position", ""),
+                    "rank_score": db.get("rank_score", 0),
+                    "rank_debug": db.get("rank_debug", {}),
                     "papers": [],
                     "patents": [],
                 }
@@ -2249,6 +2514,9 @@ def build_researcher_map(
                     "english_name": db.get("english_name", ""),
                     "korean_name": db.get("korean_name", ""),
                     "search_keyword": db.get("search_keyword", "") or db.get("used_query", ""),
+                    "position": db.get("position", ""),
+                    "rank_score": db.get("rank_score", 0),
+                    "rank_debug": db.get("rank_debug", {}),
                     "papers": [],
                     "patents": [],
                 }
@@ -2470,6 +2738,13 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         match_step = 6
         summarize_step = 7
 
+    person_context_map = build_person_context_map(
+        valid_papers,
+        valid_patents,
+        profile,
+        request_meta.get("tech_summary", ""),
+    )
+
     all_people = unique_keep_order(filtered_paper_authors + patent_inventors)[:MAX_RESEARCHERS]
 
     report(
@@ -2483,6 +2758,7 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
     # 각 매칭 결과에는 기존과 동일하게 학과 홈페이지 링크까지 포함됩니다.
     scholar_matches, unmatched_people = match_people_to_pnu_scholar_parallel(
         all_people,
+        person_context_map=person_context_map,
         max_workers=4,
     )
 
@@ -2650,6 +2926,9 @@ if debug_name:
                 "매칭점수": debug_match.get("match_score"),
                 "연구자ID": debug_match.get("researcher_id"),
                 "학과코드": debug_match.get("department_code"),
+                "직위": debug_match.get("position"),
+                "동명이인선택점수": debug_match.get("rank_score"),
+                "선택근거": debug_match.get("rank_debug"),
                 "학과홈페이지": debug_match.get("department_homepage"),
                 "링크": debug_match.get("link"),
             }
