@@ -4,7 +4,6 @@ import json
 import time
 import html
 import difflib
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional, Any
 import xml.etree.ElementTree as ET
 
@@ -1076,6 +1075,7 @@ def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Opti
             kor_name,
             detail_kor,
             detail_eng,
+            search_keyword if has_korean(search_keyword) else "",
             eng_name.replace(",", "") if eng_name else "",
             eng_name.replace("-", " ") if eng_name else "",
             eng_name.replace("-", "") if eng_name else "",
@@ -1085,6 +1085,8 @@ def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Opti
 
     if kor_name:
         official_name = kor_name
+    elif has_korean(search_keyword):
+        official_name = search_keyword
     else:
         official_name = eng_name or display_name
 
@@ -1092,7 +1094,7 @@ def normalize_scholar_api_record(record: Dict, search_keyword: str = "") -> Opti
         "official_name": official_name,
         "display_name": display_name,
         "english_name": eng_name,
-        "korean_name": kor_name,
+        "korean_name": kor_name or (search_keyword if has_korean(search_keyword) else ""),
         "all_names": all_names,
         "department": department,
         "link": official_link,
@@ -1156,6 +1158,7 @@ def parse_scholar_html_results(html_text: str, search_keyword: str = "") -> List
                 display_name,
                 eng_name,
                 kor_name,
+                search_keyword if has_korean(search_keyword) else "",
                 eng_name.replace(",", "") if eng_name else "",
                 eng_name.replace("-", " ") if eng_name else "",
                 eng_name.replace("-", "") if eng_name else "",
@@ -1163,14 +1166,14 @@ def parse_scholar_html_results(html_text: str, search_keyword: str = "") -> List
             ]
         )
 
-        official_name = kor_name or eng_name or display_name
+        official_name = kor_name or (search_keyword if has_korean(search_keyword) else "") or eng_name or display_name
 
         results.append(
             {
                 "official_name": official_name,
                 "display_name": display_name,
                 "english_name": eng_name,
-                "korean_name": kor_name,
+                "korean_name": kor_name or (search_keyword if has_korean(search_keyword) else ""),
                 "all_names": all_names,
                 "department": "PNU Scholar 검색 결과 기반 확인",
                 "link": "https://scholar.pusan.ac.kr/researchers/",
@@ -1285,53 +1288,6 @@ def score_scholar_result_against_author(author_name: str, result: Dict) -> Tuple
     return best_score, best_variant
 
 
-def is_strict_name_match(author_name: str, result: Dict, min_score: float) -> Tuple[bool, float, str]:
-    """
-    검색어 자체를 후보 이름으로 간주하지 않고, PNU Scholar record/detail에서
-    실제로 확인된 이름만 기준으로 검증합니다.
-    """
-    candidate_names = unique_keep_order(
-        [
-            result.get("display_name", ""),
-            result.get("english_name", ""),
-            result.get("korean_name", ""),
-            result.get("official_name", ""),
-        ]
-        + [n for n in (result.get("all_names", []) or []) if normalize_space(n)]
-    )
-
-    # 검색어가 후보명에 주입되어 생기는 오검증 방지
-    search_keyword = normalize_space(result.get("search_keyword", "") or result.get("used_query", ""))
-    if search_keyword:
-        candidate_names = [
-            n for n in candidate_names
-            if normalize_name_for_match(n) != normalize_name_for_match(search_keyword)
-        ]
-
-    if not candidate_names:
-        return False, 0.0, ""
-
-    variants = build_name_variants(author_name)
-    best_score = 0.0
-    best_variant = ""
-
-    for q in variants:
-        for c in candidate_names:
-            score = name_similarity(q, c)
-            if score > best_score:
-                best_score = score
-                best_variant = c
-
-    # 한글 이름은 완전 일치만 검증 처리
-    if has_korean(author_name):
-        q_norms = {normalize_name_for_match(q) for q in variants if normalize_name_for_match(q)}
-        c_norms = {normalize_name_for_match(c) for c in candidate_names if normalize_name_for_match(c)}
-        exact = bool(q_norms & c_norms)
-        return exact, 1.0 if exact else best_score, best_variant
-
-    return best_score >= min_score, best_score, best_variant
-
-
 def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
     name = normalize_space(author_name)
     if not name:
@@ -1347,6 +1303,8 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
             for r in results:
                 r["used_query"] = q
             all_results.extend(results)
+
+        time.sleep(0.12)
 
         if len(all_results) >= 5:
             break
@@ -1376,18 +1334,30 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
         norm_len = len(normalize_name_for_match(name))
         threshold = 0.78 if norm_len >= 10 else 0.82
 
-    strict_ok, strict_score, strict_variant = is_strict_name_match(name, best, threshold)
-    if not strict_ok:
-        return None
+    query_exact_hit = False
+    for q in search_queries:
+        qn = normalize_name_for_match(q)
+        display_blob = normalize_name_for_match(
+            " ".join(
+                [
+                    best.get("display_name", ""),
+                    best.get("english_name", ""),
+                    best.get("korean_name", ""),
+                    best.get("official_name", ""),
+                ]
+            )
+        )
+        if qn and qn in display_blob:
+            query_exact_hit = True
+            break
 
-    best_score = strict_score
-    if strict_variant:
-        best_variant = strict_variant
+    if best_score < threshold and not query_exact_hit:
+        return None
 
     used_query = best.get("used_query") or best.get("search_keyword") or search_queries[0]
 
     best["verified"] = True
-    best["match_score"] = round(best_score, 3)
+    best["match_score"] = round(max(best_score, 0.8 if query_exact_hit else best_score), 3)
     best["matched_variant"] = best_variant
     best["query_name"] = name
     best["search_keyword"] = used_query
@@ -1397,52 +1367,6 @@ def match_author_to_pnu_scholar(author_name: str) -> Optional[Dict]:
     )
 
     return best
-
-
-def match_people_to_pnu_scholar_parallel(
-    people: List[str],
-    max_workers: int = 6,
-) -> Tuple[Dict[str, Dict], List[str]]:
-    """
-    논문 저자/특허 발명자 목록을 PNU Scholar에 병렬 매칭합니다.
-    각 매칭 결과에는 기존 로직 그대로 학과 홈페이지 링크까지 포함됩니다.
-    """
-    people = unique_keep_order([p for p in people if normalize_space(p)])
-
-    scholar_matches: Dict[str, Dict] = {}
-    unmatched_people: List[str] = []
-
-    if not people:
-        return scholar_matches, unmatched_people
-
-    def worker(person_name: str) -> Tuple[str, Optional[Dict]]:
-        try:
-            matched = match_author_to_pnu_scholar(person_name)
-            return person_name, matched
-        except Exception:
-            return person_name, None
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {
-            executor.submit(worker, person_name): person_name
-            for person_name in people
-        }
-
-        for future in as_completed(future_map):
-            person_name = future_map[future]
-            try:
-                original_name, matched = future.result()
-            except Exception:
-                unmatched_people.append(person_name)
-                continue
-
-            if matched:
-                matched["verified"] = True
-                scholar_matches[original_name] = matched
-            else:
-                unmatched_people.append(original_name)
-
-    return scholar_matches, unmatched_people
 
 
 # =========================================================
@@ -2454,12 +2378,16 @@ def unified_analyze(uploaded_file, manual_text: str, progress_callback=None) -> 
         f"논문 저자/특허 발명자 {len(all_people)}명을 PNU Scholar 검색창 방식으로 확인하는 중입니다.",
     )
 
-    # 네트워크 I/O 중심의 PNU Scholar 검색을 병렬 처리하여 대기 시간을 줄입니다.
-    # 각 매칭 결과에는 기존과 동일하게 학과 홈페이지 링크까지 포함됩니다.
-    scholar_matches, unmatched_people = match_people_to_pnu_scholar_parallel(
-        all_people,
-        max_workers=6,
-    )
+    scholar_matches = {}
+    unmatched_people = []
+
+    for name in all_people:
+        matched = match_author_to_pnu_scholar(name)
+        if matched:
+            matched["verified"] = True
+            scholar_matches[name] = matched
+        else:
+            unmatched_people.append(name)
 
     report(
         summarize_step,
